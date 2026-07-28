@@ -17,43 +17,38 @@ The evaluator should not create new rubric dimensions during scoring. It should
 only use the existing `DynamicRubric`, including each dimension's `name`,
 `description`, `weight`, and `scoring_criteria`.
 
-## Structure
+## Evaluation Inputs and Output
+
+This diagram shows the evaluation direction: the evaluator receives both the
+original trajectory and the already-created rubric, then returns one
+`TrajectoryEvaluation`.
 
 ```mermaid
-classDiagram
-    class TrajectoryEvaluation {
-        string trajectory_id
-        string task_id
-        DynamicRubric rubric_used
-        StepEvaluation[] step_evaluations
-        dict dimension_global_scores
-        float global_score
-        bool passed_threshold
-        dict metadata
-    }
+flowchart LR
+    A[TaskDescription] --> B[DynamicRubric]
+    B --> D[LLMTrajectoryEvaluator]
+    C[Trajectory] --> D
+    D --> E[TrajectoryEvaluation]
+```
 
-    class StepEvaluation {
-        int step_id
-        DimensionScore[] dimension_scores
-        string step_quality_summary
-    }
+## Output Structure
 
-    class DimensionScore {
-        string dimension_name
-        int score
-        float confidence
-        string rationale
-    }
+This diagram shows what is stored inside the returned `TrajectoryEvaluation`.
+The arrows here mean "contains or references", not evaluation order.
 
-    class DynamicRubric {
-        string task_id
-        EvalDimension[] dimensions
-        string generation_rationale
-    }
-
-    TrajectoryEvaluation "1" --> "1" DynamicRubric
-    TrajectoryEvaluation "1" --> "1..*" StepEvaluation
-    StepEvaluation "1" --> "0..*" DimensionScore
+```mermaid
+flowchart TD
+    A[TrajectoryEvaluation]
+    A --> B[rubric_used: DynamicRubric]
+    A --> C[step_evaluations: StepEvaluation[]]
+    A --> D[dimension_global_scores]
+    A --> E[global_score]
+    A --> F[passed_threshold]
+    C --> G[dimension_scores: DimensionScore[]]
+    G --> H[dimension_name]
+    G --> I[score]
+    G --> J[confidence]
+    G --> K[rationale]
 ```
 
 ## Evaluation Questions
@@ -87,6 +82,52 @@ classDiagram
 | `confidence` | Evaluator confidence in the score. | Float from 0.0 to 1.0. |
 | `rationale` | Explanation for the score. | Should cite observable trajectory behavior. |
 | `step_quality_summary` | Short summary of the step. | Explains the overall quality of this step. |
+
+## Evaluation Prompt
+
+The evaluation stage is controlled by prompt templates in
+`adarubric/evaluator/prompts.py`.
+
+### System Prompt Purpose
+
+The system prompt tells the evaluator how to score an agent trajectory. Its
+main instructions are:
+
+| Instruction | Meaning |
+|---|---|
+| Read the rubric carefully. | Use the existing `DynamicRubric` and its 1 to 5 criteria. |
+| Evaluate each step independently. | Score each `Thought -> Action -> Observation` step. |
+| Score every applicable dimension. | Use rubric dimension names exactly; do not invent new ones. |
+| Assign confidence. | Use `0.0` to `1.0` to indicate how clearly the dimension applies. |
+| Provide rationale. | Ground each score in concrete actions or observations. |
+| Be calibrated. | Score 3 means acceptable; 5 means excellent; 1 means clearly broken. |
+
+### User Prompt Inputs
+
+The user prompt provides the actual content to be evaluated:
+
+| Prompt Section | Source |
+|---|---|
+| Evaluation Rubric | Serialized `DynamicRubric.dimensions`, including name, description, weight, and scoring criteria. |
+| Task Instruction | `TaskDescription.instruction`. |
+| Agent Trajectory | Rendered `Trajectory.steps`, including thought, action, action input, and observation. |
+
+### Expected Model Output
+
+The model is expected to return structured JSON:
+
+| Output Field | Meaning |
+|---|---|
+| `trajectory_id` | The evaluated trajectory id. |
+| `task_id` | The task id. |
+| `step_evaluations` | Step-level evaluation records. |
+| `step_id` | The trajectory step being scored. |
+| `dimension_scores` | Scores for rubric dimensions on this step. |
+| `dimension_name` | Must exactly match a rubric dimension name. |
+| `score` | Integer score from 1 to 5. |
+| `confidence` | Float confidence from 0.0 to 1.0. |
+| `rationale` | Short evidence-based explanation. |
+| `step_quality_summary` | One-sentence summary of the step. |
 
 ## Evaluation Workflow
 
