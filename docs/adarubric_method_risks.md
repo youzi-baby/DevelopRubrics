@@ -1,78 +1,8 @@
 # AdaRubric 方法风险与开放问题
 
-这份文档整理当前 AdaRubric 项目设计中暴露出来的几个方法论风险。目的不是否定这个方法，而是在把它用于轨迹评估、数据过滤、reward learning 或 DPO 数据构造之前，先把关键假设和潜在问题讲清楚。
+这份文档整理当前 AdaRubric 设计中暴露出来的几个方法论风险点。
 
-## 1. 同一个任务多次生成 Rubric 会发生漂移
-
-### 问题
-
-当前 pipeline 可以在每次评估任务时重新生成一个 `DynamicRubric`：
-
-```text
-TaskDescription
-  -> generate_rubric(task)
-  -> DynamicRubric
-  -> evaluate trajectories
-```
-
-即使面对同一个 `TaskDescription`，多次调用 LLM 也可能生成不同的 rubric。即便 `temperature=0`，也不能保证输出完全一致，因为模型服务、结构化输出实现、后端版本、推理细节都可能带来差异。
-
-### 为什么重要
-
-如果 rubric 变了，评价标准也就变了。
-
-这会带来几个风险：
-
-| 风险 | 后果 |
-|---|---|
-| 分数不稳定 | 同一条 trajectory 在不同 rubric 下可能得到不同分数。 |
-| 排名不稳定 | A 轨迹在一个 rubric 下优于 B，但换一个 rubric 后可能反过来。 |
-| 比较不公平 | 不同轨迹如果用不同标准评估，结果不再可比。 |
-| DPO 噪声 | chosen/rejected pair 可能反映的是 rubric 差异，而不是真实轨迹质量差异。 |
-| reward 漂移 | reward learning 会在一个不断变化的目标上优化。 |
-| 实验难复现 | 很难判断变化来自 agent、模型还是 rubric 本身。 |
-
-### 当前项目行为
-
-项目支持在 `pipeline.run(...)` 里传入已有 rubric：
-
-```python
-result = await pipeline.run(task, trajectories, rubric=rubric)
-```
-
-但如果不传 rubric，pipeline 会自动重新生成：
-
-```python
-if rubric is None:
-    rubric = await self.generate_rubric(...)
-```
-
-也就是说，项目支持 rubric 复用，但默认没有强制做 rubric cache 或 rubric versioning。
-
-### 后续发力方向
-
-更可靠的做法应该是：先生成、筛选、保存一个 rubric，然后后续一直复用它。
-
-```text
-TaskDescription
-  -> 生成多个候选 rubrics
-  -> 选择最合适的 rubric
-  -> 保存/cache 选中的 rubric
-  -> 后续所有可比较轨迹都复用这个 rubric
-```
-
-至少应该记录这些信息：
-
-| 记录项 | 目的 |
-|---|---|
-| `rubric_id` | 标识具体使用的是哪一版 rubric。 |
-| `task_id` | 连接 rubric 和任务。 |
-| `rubric_version` | 支持后续受控更新。 |
-| `generation_model` | 记录生成 rubric 的模型。 |
-| `generation_prompt_version` | 记录生成 rubric 使用的 prompt 版本。 |
-| `created_at` | 支持复现和审计。 |
-
-## 2. 项目缺少对 Rubric 质量的评估
+## 1. 项目缺少对 Rubric 质量的评估
 
 ### 问题
 
@@ -132,7 +62,7 @@ TaskDescription
 
 这个阶段可以用 LLM 作为 meta-evaluator，也可以用人工审核、校准轨迹，或者三者结合。
 
-## 3. 需要 Calibration Trajectories 校准 Rubric
+## 2. 需要 Calibration Trajectories 校准 Rubric
 
 ### 问题
 
@@ -149,7 +79,7 @@ TaskDescription
 
 ### 后续发力方向
 
-在正式使用 rubric 前，用一小组 calibration trajectories 测试它。
+在正式使用 rubric 前，用一小组 calibration trajectories 测试。
 
 可以准备：
 
@@ -168,11 +98,11 @@ strong > medium > weak
 
 如果某个 rubric 连这个基本排序都做不到，就应该被修改或拒绝。
 
-## 4. 固定 5 个维度不一定能迁移到所有任务域
+## 3. 固定 5 个维度不一定能迁移到所有任务域
 
 ### 问题
 
-项目常用 `num_dimensions=5`。论文可能通过敏感性分析证明，在作者的任务分布上 5 个维度效果较好，但这不代表 5 对所有新任务域都是最优的。
+项目常用 `num_dimensions=5`。论文通过敏感性分析证明，在作者的任务分布上 5 个维度效果较好，但这不代表 5 对所有新任务域都是最优的。
 
 代码中 5 是默认值：
 
@@ -236,22 +166,22 @@ domains:
     num_dimensions: 7
 ```
 
-## 5. Prompt 质量是方法本身的重要组成部分
+## 4. Prompt 质量是方法本身的重要组成部分
 
 ### 问题
 
 rubric 生成和 trajectory 评估都高度依赖 system prompt 设计。
 
-这个项目里，rubric 生成器并没有复杂算法去自动推导维度。真正的方法主要写在：
+目前 system prompt 方法主要写在：
 
 ```text
 adarubric/generator/prompts.py
 adarubric/evaluator/prompts.py
 ```
-
+目前这个 System Prompt 是固定的，
 ### 为什么重要
 
-prompt 变化会影响：
+system prompt 变化会影响整个方法的行为：
 
 | 组件 | 影响 |
 |---|---|
@@ -265,30 +195,20 @@ prompt 变化会影响：
 
 ### 后续发力方向
 
-在 rubric 和 evaluation 输出中记录 prompt 元数据：
-
-| 元数据 | 目的 |
-|---|---|
-| `generator_prompt_version` | 复现 rubric 生成过程。 |
-| `evaluator_prompt_version` | 复现 trajectory 评分过程。 |
-| `generation_model` | 记录生成 rubric 的模型。 |
-| `evaluation_model` | 记录评估 trajectory 的模型。 |
-| `temperature` | 记录采样设置。 |
-| `max_tokens` | 记录输出预算。 |
+使用验证集微调 system prompt.
 
 ## 总结
 
-AdaRubric 的核心想法是有价值的：针对不同任务动态生成 rubric，并用它产生细粒度的 trajectory 评价和 reward 信号。但如果要可靠使用，还需要围绕 rubric 的稳定性和质量增加控制机制。
+AdaRubric 的核心价值：针对不同任务动态生成 rubric，并用它产生细粒度的 trajectory 评价和 reward 信号。但如果要可靠使用，还需要围绕 rubric 的稳定性和质量增加控制机制。
 
 主要暴露的问题是：
 
 | 风险 | 需要的控制 |
 |---|---|
-| Rubric drift | 对选中的 rubric 做缓存和版本管理。 |
 | Rubric 质量未知 | 增加 rubric 评估和筛选。 |
 | 缺少校准 | 用代表性 calibration trajectories 测试 rubric。 |
 | 固定维度数量 | 对不同任务域做维度数量敏感性分析。 |
-| Prompt 依赖强 | 对 generator/evaluator prompt 做版本化和审计。 |
+| System Prompt 对方法行为的影响 | 验证集分析 |
 
 更强的 pipeline 应该是：
 
