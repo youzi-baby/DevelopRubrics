@@ -1,0 +1,3 @@
+1. AdaRubrics 本地化验证：a) 基于采购类 `Procurement API Orchestration` 困难任务，使用本地dsv4模型成功生成 5 维 DynamicRubric，完成 Rubric 生成链路验证。
+2. AdaRubric 代码与评估流程梳理：a) 梳理 `TaskDescription → DynamicRubric → TrajectoryEvaluation → Aggregation / Filtering / Reward Data` 主流程，明确 Rubric 生成、轨迹逐步评分、维度聚合和结果过滤的关系；b) 走读核心模块，理解 `TaskDescription`、`Trajectory`、`TrajectoryStep`、`DynamicRubric`、`EvalDimension` 和 `ScoringCriteria` 等关键结构；
+3. 文档沉淀与后续计划：a) 新增并整理 `dynamic_rubric_template.md`、`trajectory_evaluation_template.md` 和 `adarubric_method_risks.md`，沉淀 DynamicRubric 输出模板、TrajectoryEvaluation 评估模板和当前方法风险；b) 后续重点推进 RubricEvaluator / RubricSelector 设计、calibration trajectories 构建、不同 `num_dimensions` 敏感性分析。
