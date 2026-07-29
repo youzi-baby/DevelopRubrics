@@ -52,7 +52,9 @@ class EvaluatorConfig(BaseModel):
 
     aggregation_strategy: str = Field(
         default="weighted_mean",
-        description="Aggregation: weighted_mean | geometric_mean | min_score",
+        description=(
+            "Aggregation: weighted_mean | confidence_normalized | geometric_mean | min_score"
+        ),
     )
     recency_decay: float = Field(
         default=0.5,

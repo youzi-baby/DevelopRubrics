@@ -17,15 +17,26 @@ import asyncio
 import os
 from statistics import mean
 
-from adarubric.core.models import DynamicRubric, EvalDimension, TaskDescription, Trajectory
-from adarubric.core.models import TrajectoryEvaluation, TrajectoryStep
+from adarubric.core.models import (
+    DynamicRubric,
+    EvalDimension,
+    TaskDescription,
+    Trajectory,
+    TrajectoryEvaluation,
+    TrajectoryStep,
+)
 from adarubric.evaluator.aggregator import (
+    ConfidenceNormalizedAggregator,
     GeometricMeanAggregator,
     MinScoreAggregator,
     WeightedMeanAggregator,
 )
 from adarubric.evaluator.trajectory_evaluator import LLMTrajectoryEvaluator
-from adarubric.filter.threshold import AbsoluteThresholdFilter, CompositeFilter, DimensionAwareFilter
+from adarubric.filter.threshold import (
+    AbsoluteThresholdFilter,
+    CompositeFilter,
+    DimensionAwareFilter,
+)
 from adarubric.llm.openai_client import OpenAIClient
 
 
@@ -56,7 +67,9 @@ def build_fixed_rubric(task_id: str) -> DynamicRubric:
         dimensions=[
             EvalDimension(
                 name="RequirementCoverage",
-                description="Covers the exact product, quantity, EU region, and delivery constraints.",
+                description=(
+                    "Covers the exact product, quantity, EU region, and delivery constraints."
+                ),
                 weight=1.0,
                 scoring_criteria={
                     1: "Ignores most task requirements or targets the wrong product/region.",
@@ -68,7 +81,9 @@ def build_fixed_rubric(task_id: str) -> DynamicRubric:
             ),
             EvalDimension(
                 name="ToolSequenceCompleteness",
-                description="Uses the expected tools in a sensible order without skipping required stages.",
+                description=(
+                    "Uses the expected tools in a sensible order without skipping required stages."
+                ),
                 weight=1.0,
                 scoring_criteria={
                     1: "Skips most required tools or jumps directly to an unsupported answer.",
@@ -80,19 +95,27 @@ def build_fixed_rubric(task_id: str) -> DynamicRubric:
             ),
             EvalDimension(
                 name="QuoteDataQuality",
-                description="Obtains concrete supplier quote data with price, quantity, and lead-time evidence.",
+                description=(
+                    "Obtains concrete supplier quote data with price, quantity, "
+                    "and lead-time evidence."
+                ),
                 weight=1.0,
                 scoring_criteria={
                     1: "Provides no concrete quote data.",
                     2: "Provides vague or incomplete supplier data.",
                     3: "Provides basic quote data with some missing fields.",
                     4: "Provides concrete quote data for all required suppliers.",
-                    5: "Provides complete, validated quote data with relevant supplier constraints.",
+                    5: (
+                        "Provides complete, validated quote data with relevant "
+                        "supplier constraints."
+                    ),
                 },
             ),
             EvalDimension(
                 name="CostLeadTimeReasoning",
-                description="Correctly combines unit price, quantity, shipping, total cost, and lead time.",
+                description=(
+                    "Correctly combines unit price, quantity, shipping, total cost, and lead time."
+                ),
                 weight=1.0,
                 scoring_criteria={
                     1: "Does not compare cost or lead time.",
@@ -104,7 +127,9 @@ def build_fixed_rubric(task_id: str) -> DynamicRubric:
             ),
             EvalDimension(
                 name="RecommendationGrounding",
-                description="Final recommendation is justified by the collected data and task constraints.",
+                description=(
+                    "Final recommendation is justified by the collected data and task constraints."
+                ),
                 weight=1.0,
                 scoring_criteria={
                     1: "Recommendation is absent, arbitrary, or contradicted by evidence.",
@@ -191,7 +216,9 @@ def build_trajectories(task_id: str) -> list[Trajectory]:
                 thought="I will pick a supplier without searching or requesting quotes.",
                 action="submit_recommendation",
                 action_input={"primary": "RandomBearingCo", "rationale": "sounds fine"},
-                observation="Recommendation submitted without supplier search, quotes, or shipping.",
+                observation=(
+                    "Recommendation submitted without supplier search, quotes, or shipping."
+                ),
             )
         ],
         final_answer="Use RandomBearingCo.",
@@ -268,16 +295,24 @@ def print_evaluation(ev: TrajectoryEvaluation, rubric: DynamicRubric) -> None:
     weighted_dims, weighted_global = WeightedMeanAggregator(recency_decay=0.0).aggregate_steps(
         ev.step_evaluations, rubric
     )
+    conf_dims, conf_global = ConfidenceNormalizedAggregator(
+        recency_decay=0.0
+    ).aggregate_steps(ev.step_evaluations, rubric)
     geo_dims, geo_global = GeometricMeanAggregator().aggregate_steps(ev.step_evaluations, rubric)
     min_dims, min_global = MinScoreAggregator().aggregate_steps(ev.step_evaluations, rubric)
 
     print(f"\n=== {ev.trajectory_id} ===")
-    print(f"weighted_mean={weighted_global:.2f}  geometric_mean={geo_global:.2f}  min_score={min_global:.2f}")
+    print(
+        f"weighted_mean={weighted_global:.2f}  "
+        f"confidence_normalized={conf_global:.2f}  "
+        f"geometric_mean={geo_global:.2f}  min_score={min_global:.2f}"
+    )
     print(f"confidence: {confidence_summary(ev)}")
     print("dimension scores:")
     for dim in rubric.dimension_names:
         print(
             f"  {dim}: weighted={weighted_dims.get(dim, 0.0):.2f}, "
+            f"conf_norm={conf_dims.get(dim, 0.0):.2f}, "
             f"geo={geo_dims.get(dim, 0.0):.2f}, min={min_dims.get(dim, 0.0):.2f}"
         )
 
@@ -308,7 +343,10 @@ async def main() -> None:
 
     print("Model:", os.environ.get("ADARUBRIC_MODEL", "gpt-4o"))
     print("Base URL:", os.environ.get("ADARUBRIC_BASE_URL") or "OpenAI default")
-    print("\nExpected ordering: ideal-clear-pass > partial-middle > obvious-fail ~= irrelevant-actions")
+    print(
+        "\nExpected ordering: "
+        "ideal-clear-pass > partial-middle > obvious-fail ~= irrelevant-actions"
+    )
 
     evaluations = await evaluator.evaluate_batch(
         trajectories,
@@ -336,10 +374,22 @@ async def main() -> None:
     print("Survivors:", [ev.trajectory_id for ev in strict_passed])
 
     print("\nDiagnostic hints:")
-    print("- If ideal-clear-pass is below 3.0, the evaluator model is under-scoring obvious success.")
-    print("- If obvious-fail passes, the threshold/filter configuration is too loose or scores are wrong.")
-    print("- If irrelevant-actions has mean_conf > 0.5, confidence is not being treated as applicability.")
-    print("- If all trajectories are close together, the local model is likely not following the rubric well.")
+    print(
+        "- If ideal-clear-pass is below 3.0, "
+        "the evaluator model is under-scoring obvious success."
+    )
+    print(
+        "- If obvious-fail passes, "
+        "the threshold/filter configuration is too loose or scores are wrong."
+    )
+    print(
+        "- If irrelevant-actions has mean_conf > 0.5, "
+        "confidence is not being treated as applicability."
+    )
+    print(
+        "- If all trajectories are close together, "
+        "the local model is likely not following the rubric well."
+    )
 
     await client.close()
 

@@ -4,6 +4,8 @@ Aggregators compute a global score from per-step, per-dimension scores.
 The choice of aggregator affects the reward signal's sensitivity profile:
 
 - **WeightedMean**: Balanced, standard choice. Smoothly rewards improvements.
+- **ConfidenceNormalized**: Treats confidence as evidence/applicability weight,
+  so irrelevant low-confidence steps do not depress a dimension's score.
 - **GeometricMean**: Penalizes low outliers more aggressively. Good for
   tasks where all dimensions must meet a minimum bar.
 - **MinScore**: Bottleneck-sensitive. The overall score equals the worst
@@ -88,6 +90,86 @@ class WeightedMeanAggregator(AggregationStrategy):
                 dimension_globals[dim_name] = 0.0
             else:
                 dimension_globals[dim_name] = weighted_sum / weight_sum
+
+        total_rubric_weight = rubric.total_weight
+        if total_rubric_weight == 0:
+            return dimension_globals, 0.0
+
+        overall = (
+            sum(dimension_globals.get(d.name, 0.0) * d.weight for d in rubric.dimensions)
+            / total_rubric_weight
+        )
+
+        return dimension_globals, round(overall, 4)
+
+
+class ConfidenceNormalizedAggregator(AggregationStrategy):
+    """Weighted mean that normalizes by confidence-weighted evidence.
+
+    Unlike :class:`WeightedMeanAggregator`, confidence is used in both the
+    numerator and denominator:
+
+        sum(score * confidence * step_weight) / sum(confidence * step_weight)
+
+    This is useful when confidence means step-dimension applicability. Steps
+    with little evidence for a dimension then have little influence instead of
+    lowering the dimension score simply by appearing in the trajectory.
+    """
+
+    def __init__(self, recency_decay: float = 0.0, *, min_evidence: float = 1e-8) -> None:
+        """
+        Parameters
+        ----------
+        recency_decay : float
+            Exponential decay factor for step weighting. 0.0 = uniform weights.
+            Higher values give more weight to later steps.
+        min_evidence : float
+            Minimum confidence-weighted evidence required for a dimension to
+            receive a non-zero score.
+        """
+        self.recency_decay = recency_decay
+        self.min_evidence = min_evidence
+
+    def _step_weights(self, n_steps: int) -> list[float]:
+        if self.recency_decay <= 0.0 or n_steps <= 1:
+            return [1.0] * n_steps
+        weights = [math.exp(self.recency_decay * i / (n_steps - 1)) for i in range(n_steps)]
+        total = sum(weights)
+        return [w / total * n_steps for w in weights]
+
+    def aggregate_steps(
+        self,
+        step_evaluations: list[StepEvaluation],
+        rubric: DynamicRubric,
+    ) -> tuple[dict[str, float], float]:
+        if not step_evaluations:
+            return {}, 0.0
+
+        step_weights = self._step_weights(len(step_evaluations))
+        dim_scores: dict[str, list[tuple[int, float, float]]] = {
+            d.name: [] for d in rubric.dimensions
+        }
+
+        for step_eval, sw in zip(step_evaluations, step_weights, strict=True):
+            for ds in step_eval.dimension_scores:
+                if ds.dimension_name in dim_scores:
+                    dim_scores[ds.dimension_name].append((ds.score, ds.confidence, sw))
+
+        dimension_globals: dict[str, float] = {}
+        for dim_name, score_conf_weight_triples in dim_scores.items():
+            if not score_conf_weight_triples:
+                dimension_globals[dim_name] = 0.0
+                continue
+
+            evidence_sum = sum(confidence * sw for _, confidence, sw in score_conf_weight_triples)
+            if evidence_sum <= self.min_evidence:
+                dimension_globals[dim_name] = 0.0
+                continue
+
+            weighted_sum = sum(
+                score * confidence * sw for score, confidence, sw in score_conf_weight_triples
+            )
+            dimension_globals[dim_name] = weighted_sum / evidence_sum
 
         total_rubric_weight = rubric.total_weight
         if total_rubric_weight == 0:

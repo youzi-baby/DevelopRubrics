@@ -26,6 +26,7 @@ from adarubric.core.models import (
 )
 from adarubric.evaluator.aggregator import (
     AggregationStrategy,
+    ConfidenceNormalizedAggregator,
     GeometricMeanAggregator,
     MinScoreAggregator,
     WeightedMeanAggregator,
@@ -86,13 +87,20 @@ class PipelineResult:
         return sum(e.global_score for e in self.all_evaluations) / len(self.all_evaluations)
 
 
-_AGGREGATION_STRATEGIES = ("weighted_mean", "geometric_mean", "min_score")
+_AGGREGATION_STRATEGIES = (
+    "weighted_mean",
+    "confidence_normalized",
+    "geometric_mean",
+    "min_score",
+)
 
 
 def _build_aggregator(config: AdaRubricConfig) -> AggregationStrategy:
     strategy = config.evaluator.aggregation_strategy
     if strategy == "weighted_mean":
         return WeightedMeanAggregator(recency_decay=config.evaluator.recency_decay)
+    if strategy == "confidence_normalized":
+        return ConfidenceNormalizedAggregator(recency_decay=config.evaluator.recency_decay)
     if strategy == "geometric_mean":
         return GeometricMeanAggregator()
     if strategy == "min_score":
