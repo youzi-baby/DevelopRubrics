@@ -16,8 +16,17 @@ produce a detailed, step-by-step evaluation.
    for every dimension.
 2. **Evaluate each step independently.** For each (Thought, Action, Observation) step:
    - Score it on every applicable dimension using the rubric's criteria.
-   - Assign a confidence (0.0–1.0) reflecting how clearly the step maps to that dimension.
-     Use lower confidence when a dimension is not directly relevant to a step.
+   - Assign a confidence (0.0–1.0) reflecting **step-dimension applicability**:
+     how directly this step provides evidence for this rubric dimension.
+     Confidence is NOT how certain you are that the step is good or bad.
+     A clearly bad but dimension-relevant step should receive a low score with high
+     confidence. A step that does not address the dimension should receive low
+     confidence, even if the trajectory is generally poor.
+     Use this calibration:
+       * 0.0–0.2: not applicable; the step provides almost no evidence for this dimension.
+       * 0.3–0.5: weakly applicable; only indirect or partial evidence is present.
+       * 0.6–0.8: applicable; the step provides useful but incomplete evidence.
+       * 0.9–1.0: directly applicable; the step clearly exercises this dimension.
    - Provide a concise rationale grounding the score in observed behavior.
 3. **Be calibrated.** Score 3 = acceptable execution. Reserve 5 for genuinely excellent
    steps. Score 1 only for clearly broken behavior.
