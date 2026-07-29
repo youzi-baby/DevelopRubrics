@@ -1,27 +1,37 @@
 # 今日工作总结
 
-今天主要围绕 AdaRubric 项目进行了论文与代码实现的对照分析，重点理解了项目中 rubric 生成、轨迹评估、分数聚合和 pass/fail 筛选的完整流程。
+今天主要测试并分析了 AdaRubric 中 confidence-weighted aggregation 的问题，并基于实验结果新增了一种更合理的聚合方式。
 
-## 完成的工作
+## 做了什么
 
-- 阅读并梳理了 AdaRubric 论文中的核心方法，包括动态 rubric 生成、rubric validation、confidence-weighted evaluation 和轨迹筛选机制。
-- 对照项目源码，确认了 `supply_chain_eval.py` 所调用的实际代码流程。
-- 分析了项目如何使用 rubric 对 trajectory 进行打分，并确认最终 pass/fail 不是模型直接判断，而是基于聚合分数和阈值过滤得到的。
-- 检查了论文描述与代码实现之间的差异，发现当前项目更偏向核心流程 demo，并没有完整实现论文中的所有机制。
+- 使用 `local_model_diagnostic.py` 对本地模型进行了评估能力测试。
+- 对比了原始 `weighted_mean` 聚合方式和新加入的 `confidence_normalized` 聚合方式。
+- 发现本地模型并不是完全无法区分好坏轨迹，而是原来的聚合公式会系统性压低好轨迹分数。
+- 新增并接入了 `ConfidenceNormalizedAggregator`，让 confidence 同时进入分子和分母。
+- 重新测试后，ideal 轨迹从原来的 `2.17` 提升到 `3.57`，而明显失败轨迹仍保持在 `1.00` 左右。
 
 ## 遇到的问题
 
-- 论文中提到的 rubric validation 在当前项目中没有完整实现，例如维度语义去重、权重约束检查、失败重试和模板 fallback 都没有实际落地。
-- 在实际测试中发现 confidence 分数普遍偏高，导致 confidence-weighted aggregation 的区分度不够明显。
-- 项目中 pass/fail 的判断依赖固定阈值或维度阈值，这种方式对不同任务的适应性可能有限。
+原来的公式是：
+
+```text
+sum(score * confidence * step_weight) / sum(step_weight)
+```
+
+这个公式的问题是：`confidence` 只进入分子，没有进入分母。对于多步骤、多维度任务来说，很多 step 本来就只和部分维度相关。如果某个 step 与某个维度不相关，模型给了低 confidence，它仍然会占据分母中的 step weight，导致无关 step 也会把该维度分数拉低。
+
+因此，即使是一条明显较好的轨迹，也可能因为多个低相关 step 被平均进来，最终得到偏低的全局分数。
 
 ## 给出的方案
 
-- 修改 evaluation system prompt，明确 confidence 应该表示 step 与 dimension 的相关性，而不是模型对评分的自信程度。
-- 建议后续可以补充 rubric validation 机制，对生成出的 rubric 做质量检查。
-- 对于 pass/fail，可以根据任务类型调整 global score 阈值和 dimension-aware threshold，而不是固定使用默认值。
-- 后续可以考虑加入 rubric 质量评估、不同维度数量的敏感性分析，以及更完整的 DPO 数据生成流程。
+新增的公式是：
+
+```text
+sum(score * confidence * step_weight) / sum(confidence * step_weight)
+```
+
+这样 confidence 被解释为 step 与 dimension 的相关性权重。低相关 step 不会再强行参与平均，也就不会异常压低相关维度的分数；而真正相关但表现差的 step，因为 confidence 高、score 低，仍然会被有效惩罚。
 
 ## 启发
 
-通过今天的分析发现，AdaRubric 的核心价值不仅在于自动生成 rubric，也在于如何保证 rubric 的稳定性、可解释性和评估有效性。论文中的方法设计比当前代码实现更完整，后续如果要实际应用，需要重点补齐 rubric validation、confidence 校准和任务自适应阈值这些环节。
+这次实验说明，问题不一定出在本地模型本身，而可能出在评分聚合方式和 confidence 语义不匹配。对于复杂 agent trajectory 评估，confidence 更适合作为“证据相关性权重”，而不是单纯的分数折扣项。新的 `confidence_normalized` 聚合方式提升了好坏轨迹的区分度，同时没有把差轨迹一起抬高。
