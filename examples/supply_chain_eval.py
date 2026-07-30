@@ -21,6 +21,13 @@ Rubric persistence:
     generates a rubric once and saves it there. Set ADARUBRIC_REGENERATE_RUBRIC=1
     to force regeneration, or ADARUBRIC_RUBRIC_PATH to use a different JSON file.
 
+Jiawen dataset:
+    If jiawen-dataset exists, the script loads TaskDescription and Trajectory
+    objects from jiawen-dataset/trajectory_tools/excel_to_object.py by default.
+    Set ADARUBRIC_USE_JIAWEN_DATA=0 to use the original built-in supply-chain
+    demo. Set ADARUBRIC_TASK_ID to choose a specific task, and
+    ADARUBRIC_MAX_TRAJECTORIES to evaluate only the first N trajectories.
+
 Stability evaluation:
     By default, the script runs evaluation 10 times against the same persisted
     rubric and writes a stability report. Set ADARUBRIC_EVAL_RUNS to change the
@@ -31,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, pstdev
@@ -55,20 +63,32 @@ from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUBRIC_PATH = PROJECT_ROOT / "docs" / "rubrics" / "supply_chain_rubric.json"
+DEFAULT_JIAWEN_RUBRIC_PATH = PROJECT_ROOT / "docs" / "rubrics" / "jiawen_gui_rubric.json"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "docs" / "evaluation_outputs"
+JIAWEN_DATASET_ROOT = PROJECT_ROOT / "jiawen-dataset"
 
 
-def _rubric_path_from_env() -> Path:
+def _rubric_path_from_env(default_path: Path) -> Path:
     configured = os.environ.get("ADARUBRIC_RUBRIC_PATH")
     if not configured:
-        return DEFAULT_RUBRIC_PATH
+        return default_path
     path = Path(configured)
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def _bool_env(name: str, *, default: bool) -> bool:
+    configured = os.environ.get(name)
+    if configured is None:
+        return default
+    return configured.strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _should_regenerate_rubric() -> bool:
-    value = os.environ.get("ADARUBRIC_REGENERATE_RUBRIC", "")
-    return value.strip().lower() in {"1", "true", "yes", "y"}
+    return _bool_env("ADARUBRIC_REGENERATE_RUBRIC", default=False)
+
+
+def _use_jiawen_dataset() -> bool:
+    return _bool_env("ADARUBRIC_USE_JIAWEN_DATA", default=JIAWEN_DATASET_ROOT.exists())
 
 
 def _report_path_from_env() -> Path:
@@ -90,6 +110,68 @@ def _eval_runs_from_env() -> int:
     if runs < 1:
         raise ValueError(f"ADARUBRIC_EVAL_RUNS must be >= 1, got {runs}")
     return runs
+
+
+def _max_trajectories_from_env() -> int | None:
+    configured = os.environ.get("ADARUBRIC_MAX_TRAJECTORIES")
+    if not configured:
+        return None
+    try:
+        max_trajectories = int(configured)
+    except ValueError:
+        raise ValueError(
+            f"ADARUBRIC_MAX_TRAJECTORIES must be an integer, got {configured!r}"
+        ) from None
+    if max_trajectories < 1:
+        raise ValueError(f"ADARUBRIC_MAX_TRAJECTORIES must be >= 1, got {max_trajectories}")
+    return max_trajectories
+
+
+def load_jiawen_task_and_trajectories() -> tuple[TaskDescription, list[Trajectory]]:
+    """Load GUI task and trajectories produced by jiawen-dataset."""
+    if not JIAWEN_DATASET_ROOT.exists():
+        raise FileNotFoundError(f"Jiawen dataset directory not found: {JIAWEN_DATASET_ROOT}")
+
+    dataset_path = str(JIAWEN_DATASET_ROOT)
+    if dataset_path not in sys.path:
+        sys.path.insert(0, dataset_path)
+
+    try:
+        from trajectory_tools.excel_to_object import load_objects
+    except ModuleNotFoundError as exc:
+        if exc.name == "openpyxl":
+            raise RuntimeError(
+                "jiawen-dataset requires openpyxl. Install it with: "
+                ".venv\\Scripts\\python -m pip install openpyxl"
+            ) from exc
+        raise
+
+    tasks_by_id, trajectories = load_objects()
+    if not tasks_by_id:
+        raise ValueError("jiawen-dataset returned no TaskDescription objects")
+
+    task_id = os.environ.get("ADARUBRIC_TASK_ID")
+    if task_id:
+        if task_id not in tasks_by_id:
+            available = ", ".join(sorted(tasks_by_id))
+            raise ValueError(f"Unknown ADARUBRIC_TASK_ID={task_id!r}. Available: {available}")
+        task = tasks_by_id[task_id]
+    else:
+        task = next(iter(tasks_by_id.values()))
+
+    selected = [trajectory for trajectory in trajectories if trajectory.task_id == task.task_id]
+    max_trajectories = _max_trajectories_from_env()
+    if max_trajectories is not None:
+        selected = selected[:max_trajectories]
+
+    if not selected:
+        raise ValueError(f"No trajectories found for task_id={task.task_id}")
+
+    print(
+        f"Loaded Jiawen dataset task={task.task_id} with "
+        f"{len(selected)} trajectory/trajectories"
+    )
+    return task, selected
 
 
 async def load_or_generate_rubric(
@@ -319,6 +401,14 @@ async def main() -> None:
         final_answer="Use BearingCo.",
     )
 
+    trajectories_for_eval = [good_trajectory, weak_trajectory]
+    default_rubric_path = DEFAULT_RUBRIC_PATH
+    if _use_jiawen_dataset():
+        task, trajectories_for_eval = load_jiawen_task_and_trajectories()
+        default_rubric_path = DEFAULT_JIAWEN_RUBRIC_PATH
+    else:
+        print("Using built-in supply-chain demo task and trajectories")
+
     client = OpenAIClient(
         model=os.environ.get("ADARUBRIC_MODEL", "gpt-4o"),
         base_url=os.environ.get("ADARUBRIC_BASE_URL"),
@@ -337,7 +427,7 @@ async def main() -> None:
         ]),
     )
 
-    rubric_path = _rubric_path_from_env()
+    rubric_path = _rubric_path_from_env(default_rubric_path)
     rubric = await load_or_generate_rubric(
         pipeline,
         task,
@@ -351,7 +441,7 @@ async def main() -> None:
         print(f"Evaluation run {run_number}/{eval_runs}")
         result = await pipeline.run(
             task,
-            [good_trajectory, weak_trajectory],
+            trajectories_for_eval,
             rubric=rubric,
         )
         results.append(result)
