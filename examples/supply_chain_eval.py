@@ -20,6 +20,11 @@ Rubric persistence:
     docs/rubrics/supply_chain_rubric.json. If the file does not exist, it
     generates a rubric once and saves it there. Set ADARUBRIC_REGENERATE_RUBRIC=1
     to force regeneration, or ADARUBRIC_RUBRIC_PATH to use a different JSON file.
+
+Stability evaluation:
+    By default, the script runs evaluation 10 times against the same persisted
+    rubric and writes a stability report. Set ADARUBRIC_EVAL_RUNS to change the
+    repeat count.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
+from statistics import mean, pstdev
 
 from adarubric import (
     AdaRubricPipeline,
@@ -75,6 +81,17 @@ def _report_path_from_env() -> Path:
     return DEFAULT_REPORT_DIR / f"supply_chain_eval_{timestamp}.txt"
 
 
+def _eval_runs_from_env() -> int:
+    configured = os.environ.get("ADARUBRIC_EVAL_RUNS", "10")
+    try:
+        runs = int(configured)
+    except ValueError:
+        raise ValueError(f"ADARUBRIC_EVAL_RUNS must be an integer, got {configured!r}") from None
+    if runs < 1:
+        raise ValueError(f"ADARUBRIC_EVAL_RUNS must be >= 1, got {runs}")
+    return runs
+
+
 async def load_or_generate_rubric(
     pipeline: AdaRubricPipeline,
     task: TaskDescription,
@@ -94,20 +111,9 @@ async def load_or_generate_rubric(
     return rubric
 
 
-def build_report(result: PipelineResult, *, rubric_path: Path) -> str:
+def _format_run_result(result: PipelineResult, run_number: int) -> list[str]:
     lines: list[str] = []
-    lines.append("=" * 60)
-    lines.append("AdaRubric - Multi-Step API Orchestration Evaluation")
-    lines.append("=" * 60)
-    lines.append(f"Rubric file: {rubric_path}")
-    lines.append("")
-    lines.append(f"Rubric Dimensions ({len(result.rubric.dimensions)}):")
-    for dim in result.rubric.dimensions:
-        lines.append(f"  [{dim.weight:.1f}x] {dim.name}: {dim.description[:70]}...")
-
-    lines.append("")
-    lines.append(f"Rationale: {result.rubric.generation_rationale[:200]}")
-
+    lines.append(f"## Run {run_number}")
     for ev in result.all_evaluations:
         status = "PASS" if ev.passed_threshold else "FAIL"
         lines.append("")
@@ -118,6 +124,73 @@ def build_report(result: PipelineResult, *, rubric_path: Path) -> str:
     lines.append("")
     lines.append(f"Survival rate: {result.survival_rate:.0%}")
     lines.append(f"Survivors: {[e.trajectory_id for e in result.surviving_evaluations]}")
+    return lines
+
+
+def _format_stability_summary(results: list[PipelineResult]) -> list[str]:
+    lines: list[str] = []
+    lines.append("## Stability Summary")
+
+    scores_by_traj: dict[str, list[float]] = {}
+    pass_counts: dict[str, int] = {}
+    dimension_scores_by_traj: dict[str, dict[str, list[float]]] = {}
+
+    for result in results:
+        for ev in result.all_evaluations:
+            scores_by_traj.setdefault(ev.trajectory_id, []).append(ev.global_score)
+            pass_counts[ev.trajectory_id] = pass_counts.get(ev.trajectory_id, 0) + int(
+                ev.passed_threshold
+            )
+            dim_scores = dimension_scores_by_traj.setdefault(ev.trajectory_id, {})
+            for dim_name, dim_score in ev.dimension_global_scores.items():
+                dim_scores.setdefault(dim_name, []).append(dim_score)
+
+    for trajectory_id, scores in scores_by_traj.items():
+        score_std = pstdev(scores) if len(scores) > 1 else 0.0
+        lines.append("")
+        lines.append(f"--- {trajectory_id} ---")
+        lines.append(
+            "global_score: "
+            f"mean={mean(scores):.3f}, std={score_std:.3f}, "
+            f"min={min(scores):.3f}, max={max(scores):.3f}, "
+            f"pass={pass_counts.get(trajectory_id, 0)}/{len(scores)}"
+        )
+
+        for dim_name, dim_scores in dimension_scores_by_traj.get(trajectory_id, {}).items():
+            dim_std = pstdev(dim_scores) if len(dim_scores) > 1 else 0.0
+            lines.append(
+                f"  {dim_name}: mean={mean(dim_scores):.3f}, "
+                f"std={dim_std:.3f}, min={min(dim_scores):.3f}, max={max(dim_scores):.3f}"
+            )
+
+    return lines
+
+
+def build_report(results: list[PipelineResult], *, rubric_path: Path) -> str:
+    if not results:
+        raise ValueError("At least one PipelineResult is required")
+
+    first_result = results[0]
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("AdaRubric - Multi-Step API Orchestration Stability Evaluation")
+    lines.append("=" * 60)
+    lines.append(f"Rubric file: {rubric_path}")
+    lines.append(f"Evaluation runs: {len(results)}")
+    lines.append("")
+    lines.append(f"Rubric Dimensions ({len(first_result.rubric.dimensions)}):")
+    for dim in first_result.rubric.dimensions:
+        lines.append(f"  [{dim.weight:.1f}x] {dim.name}: {dim.description[:70]}...")
+
+    lines.append("")
+    lines.append(f"Rationale: {first_result.rubric.generation_rationale[:200]}")
+    lines.append("")
+    lines.extend(_format_stability_summary(results))
+
+    for run_number, result in enumerate(results, 1):
+        lines.append("")
+        lines.extend(_format_run_result(result, run_number))
+
     return "\n".join(lines)
 
 
@@ -272,13 +345,18 @@ async def main() -> None:
         num_dimensions=5,
     )
 
-    result = await pipeline.run(
-        task,
-        [good_trajectory, weak_trajectory],
-        rubric=rubric,
-    )
+    eval_runs = _eval_runs_from_env()
+    results: list[PipelineResult] = []
+    for run_number in range(1, eval_runs + 1):
+        print(f"Evaluation run {run_number}/{eval_runs}")
+        result = await pipeline.run(
+            task,
+            [good_trajectory, weak_trajectory],
+            rubric=rubric,
+        )
+        results.append(result)
 
-    report = build_report(result, rubric_path=rubric_path)
+    report = build_report(results, rubric_path=rubric_path)
     report_path = _report_path_from_env()
     save_report(report, report_path)
     print(report)
