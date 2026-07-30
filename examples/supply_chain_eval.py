@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime
 from pathlib import Path
 
 from adarubric import (
     AdaRubricPipeline,
     DynamicRubric,
+    PipelineResult,
     TaskDescription,
     Trajectory,
     TrajectoryStep,
@@ -47,6 +49,7 @@ from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUBRIC_PATH = PROJECT_ROOT / "docs" / "rubrics" / "supply_chain_rubric.json"
+DEFAULT_REPORT_DIR = PROJECT_ROOT / "docs" / "evaluation_outputs"
 
 
 def _rubric_path_from_env() -> Path:
@@ -60,6 +63,16 @@ def _rubric_path_from_env() -> Path:
 def _should_regenerate_rubric() -> bool:
     value = os.environ.get("ADARUBRIC_REGENERATE_RUBRIC", "")
     return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _report_path_from_env() -> Path:
+    configured = os.environ.get("ADARUBRIC_REPORT_PATH")
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return DEFAULT_REPORT_DIR / f"supply_chain_eval_{timestamp}.txt"
 
 
 async def load_or_generate_rubric(
@@ -79,6 +92,38 @@ async def load_or_generate_rubric(
     rubric_path.write_text(rubric.model_dump_json(indent=2) + "\n", encoding="utf-8")
     print(f"Generated and saved rubric to {rubric_path}")
     return rubric
+
+
+def build_report(result: PipelineResult, *, rubric_path: Path) -> str:
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("AdaRubric - Multi-Step API Orchestration Evaluation")
+    lines.append("=" * 60)
+    lines.append(f"Rubric file: {rubric_path}")
+    lines.append("")
+    lines.append(f"Rubric Dimensions ({len(result.rubric.dimensions)}):")
+    for dim in result.rubric.dimensions:
+        lines.append(f"  [{dim.weight:.1f}x] {dim.name}: {dim.description[:70]}...")
+
+    lines.append("")
+    lines.append(f"Rationale: {result.rubric.generation_rationale[:200]}")
+
+    for ev in result.all_evaluations:
+        status = "PASS" if ev.passed_threshold else "FAIL"
+        lines.append("")
+        lines.append(f"--- {ev.trajectory_id} [{status}] score={ev.global_score:.2f} ---")
+        for name, score in ev.dimension_global_scores.items():
+            lines.append(f"  {name}: {score:.2f}")
+
+    lines.append("")
+    lines.append(f"Survival rate: {result.survival_rate:.0%}")
+    lines.append(f"Survivors: {[e.trajectory_id for e in result.surviving_evaluations]}")
+    return "\n".join(lines)
+
+
+def save_report(report: str, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report + "\n", encoding="utf-8")
 
 
 async def main() -> None:
@@ -233,23 +278,11 @@ async def main() -> None:
         rubric=rubric,
     )
 
-    print("=" * 60)
-    print("AdaRubric — Multi-Step API Orchestration Evaluation")
-    print("=" * 60)
-    print(f"\nRubric Dimensions ({len(result.rubric.dimensions)}):")
-    for dim in result.rubric.dimensions:
-        print(f"  [{dim.weight:.1f}x] {dim.name}: {dim.description[:70]}...")
-
-    print(f"\nRationale: {result.rubric.generation_rationale[:200]}")
-
-    for ev in result.all_evaluations:
-        status = "PASS" if ev.passed_threshold else "FAIL"
-        print(f"\n--- {ev.trajectory_id} [{status}] score={ev.global_score:.2f} ---")
-        for name, score in ev.dimension_global_scores.items():
-            print(f"  {name}: {score:.2f}")
-
-    print(f"\nSurvival rate: {result.survival_rate:.0%}")
-    print(f"Survivors: {[e.trajectory_id for e in result.surviving_evaluations]}")
+    report = build_report(result, rubric_path=rubric_path)
+    report_path = _report_path_from_env()
+    save_report(report, report_path)
+    print(report)
+    print(f"\nSaved report to {report_path}")
 
 
 if __name__ == "__main__":
