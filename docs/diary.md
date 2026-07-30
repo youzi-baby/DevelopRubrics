@@ -1,37 +1,11 @@
 # 今日工作总结
 
-今天主要测试并分析了 AdaRubric 中 confidence-weighted aggregation 的问题，并基于实验结果新增了一种更合理的聚合方式。
+今天主要围绕 AdaRubric 在真实 GUI trajectory 数据上的接入和评估稳定性进行了实验与改造。前面已经完成了 supply-chain demo 的验证，今天进一步把 Jiawen 数据集中的 Excel 轨迹对象接入到 `supply_chain_eval.py` 中，使脚本可以直接从 `jiawen-dataset/trajectory_tools/excel_to_object.py` 加载我们自己的 `TaskDescription` 和 `Trajectory` 数据，而不是继续使用示例里的手写 good / weak 轨迹。
 
-## 做了什么
+在改造过程中，保留了原来的 supply-chain demo 作为备用入口，同时让脚本默认检测并使用 `jiawen-dataset`。为了避免不同任务之间误用 rubric，也把 Jiawen 数据默认对应的 rubric 路径改成了 `docs/rubrics/jiawen_gui_rubric.json`。这样后续可以针对我们自己的 GUI 任务固定 rubric，然后反复运行 evaluator，观察同一 rubric 下模型评分是否稳定。
 
-- 使用 `local_model_diagnostic.py` 对本地模型进行了评估能力测试。
-- 对比了原始 `weighted_mean` 聚合方式和新加入的 `confidence_normalized` 聚合方式。
-- 发现本地模型并不是完全无法区分好坏轨迹，而是原来的聚合公式会系统性压低好轨迹分数。
-- 新增并接入了 `ConfidenceNormalizedAggregator`，让 confidence 同时进入分子和分母。
-- 重新测试后，ideal 轨迹从原来的 `2.17` 提升到 `3.57`，而明显失败轨迹仍保持在 `1.00` 左右。
+今天还继续完善了稳定性测试流程。脚本现在可以固定同一个 rubric，对同一批 trajectories 连续评估 10 次，并把每一轮结果以及均值、标准差、最大值、最小值、pass 次数等统计信息保存到报告文件中。这个设计可以帮助我们判断 evaluator 的波动范围，以及 good / bad trajectory 的排序和 pass/fail 结果是否稳定。
 
-## 遇到的问题
+实际运行时遇到了一个本地模型服务相关的问题：在第 7 轮评估时出现了 `404 upstream error`。由于前面多轮已经成功完成，这个问题更像是本地模型服务或上游代理的偶发失败，而不是 rubric 或 evaluator 的逻辑错误。为此，进一步在脚本中加入了更适合本地模型的设置：默认将 trajectory evaluation 并发数降为 1，并为每一轮 evaluation 增加自动重试机制，减少实验被偶发服务错误中断的概率。
 
-原来的公式是：
-
-```text
-sum(score * confidence * step_weight) / sum(step_weight)
-```
-
-这个公式的问题是：`confidence` 只进入分子，没有进入分母。对于多步骤、多维度任务来说，很多 step 本来就只和部分维度相关。如果某个 step 与某个维度不相关，模型给了低 confidence，它仍然会占据分母中的 step weight，导致无关 step 也会把该维度分数拉低。
-
-因此，即使是一条明显较好的轨迹，也可能因为多个低相关 step 被平均进来，最终得到偏低的全局分数。
-
-## 给出的方案
-
-新增的公式是：
-
-```text
-sum(score * confidence * step_weight) / sum(confidence * step_weight)
-```
-
-这样 confidence 被解释为 step 与 dimension 的相关性权重。低相关 step 不会再强行参与平均，也就不会异常压低相关维度的分数；而真正相关但表现差的 step，因为 confidence 高、score 低，仍然会被有效惩罚。
-
-## 启发
-
-这次实验说明，问题不一定出在本地模型本身，而可能出在评分聚合方式和 confidence 语义不匹配。对于复杂 agent trajectory 评估，confidence 更适合作为“证据相关性权重”，而不是单纯的分数折扣项。新的 `confidence_normalized` 聚合方式提升了好坏轨迹的区分度，同时没有把差轨迹一起抬高。
+今天的主要启发是，真实数据接入后，评估系统的问题会从单纯的方法理解，转向更完整的工程稳定性问题。固定 rubric、重复评估、保存报告、控制并发、失败重试，这些机制对于判断一个 evaluator 是否可用非常重要。后续如果要系统比较不同模型或不同 rubric 的效果，需要继续保持 task、trajectory、rubric 和 evaluator 配置的可控性，避免把模型能力差异、rubric 差异和运行环境波动混在一起。
