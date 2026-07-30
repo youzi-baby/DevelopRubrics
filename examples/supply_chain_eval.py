@@ -14,20 +14,28 @@ For an OpenAI-compatible local model server on PowerShell:
     $env:ADARUBRIC_API_KEY="EMPTY"
     $env:ADARUBRIC_MODEL="your-local-model-name"
     .venv\\Scripts\\python examples\\supply_chain_eval.py
+
+Rubric persistence:
+    By default, the script loads an existing rubric from
+    docs/rubrics/supply_chain_rubric.json. If the file does not exist, it
+    generates a rubric once and saves it there. Set ADARUBRIC_REGENERATE_RUBRIC=1
+    to force regeneration, or ADARUBRIC_RUBRIC_PATH to use a different JSON file.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 from adarubric import (
     AdaRubricPipeline,
+    DynamicRubric,
     TaskDescription,
     Trajectory,
     TrajectoryStep,
 )
-from adarubric.evaluator.aggregator import WeightedMeanAggregator
+from adarubric.evaluator.aggregator import ConfidenceNormalizedAggregator
 from adarubric.evaluator.trajectory_evaluator import LLMTrajectoryEvaluator
 from adarubric.filter.threshold import (
     AbsoluteThresholdFilter,
@@ -36,6 +44,41 @@ from adarubric.filter.threshold import (
 )
 from adarubric.generator.llm_generator import LLMRubricGenerator
 from adarubric.llm.openai_client import OpenAIClient
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RUBRIC_PATH = PROJECT_ROOT / "docs" / "rubrics" / "supply_chain_rubric.json"
+
+
+def _rubric_path_from_env() -> Path:
+    configured = os.environ.get("ADARUBRIC_RUBRIC_PATH")
+    if not configured:
+        return DEFAULT_RUBRIC_PATH
+    path = Path(configured)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _should_regenerate_rubric() -> bool:
+    value = os.environ.get("ADARUBRIC_REGENERATE_RUBRIC", "")
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+async def load_or_generate_rubric(
+    pipeline: AdaRubricPipeline,
+    task: TaskDescription,
+    *,
+    rubric_path: Path,
+    num_dimensions: int = 5,
+) -> DynamicRubric:
+    if rubric_path.exists() and not _should_regenerate_rubric():
+        rubric = DynamicRubric.model_validate_json(rubric_path.read_text(encoding="utf-8"))
+        print(f"Loaded rubric from {rubric_path}")
+        return rubric
+
+    rubric = await pipeline.generate_rubric(task, num_dimensions=num_dimensions)
+    rubric_path.parent.mkdir(parents=True, exist_ok=True)
+    rubric_path.write_text(rubric.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    print(f"Generated and saved rubric to {rubric_path}")
+    return rubric
 
 
 async def main() -> None:
@@ -168,7 +211,7 @@ async def main() -> None:
         generator=LLMRubricGenerator(client),
         evaluator=LLMTrajectoryEvaluator(
             client,
-            aggregator=WeightedMeanAggregator(recency_decay=1.0),
+            aggregator=ConfidenceNormalizedAggregator(recency_decay=1.0),
         ),
         filter_=CompositeFilter([
             AbsoluteThresholdFilter(min_score=2.5),
@@ -176,10 +219,18 @@ async def main() -> None:
         ]),
     )
 
+    rubric_path = _rubric_path_from_env()
+    rubric = await load_or_generate_rubric(
+        pipeline,
+        task,
+        rubric_path=rubric_path,
+        num_dimensions=5,
+    )
+
     result = await pipeline.run(
         task,
         [good_trajectory, weak_trajectory],
-        num_dimensions=5,
+        rubric=rubric,
     )
 
     print("=" * 60)
