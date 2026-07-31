@@ -13,6 +13,7 @@ from adarubric.generator.prompts import (
     RUBRIC_GENERATION_SYSTEM,
     RUBRIC_GENERATION_USER,
 )
+from adarubric.generator.validation import RubricValidator
 from adarubric.llm.base import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -39,10 +40,18 @@ class LLMRubricGenerator(RubricGenerator):
         *,
         include_few_shot: bool = True,
         max_tokens: int = 4096,
+        rubric_validator: RubricValidator | None = None,
+        max_validation_attempts: int = 10,
     ) -> None:
+        if max_validation_attempts < 1:
+            raise ValueError(
+                f"max_validation_attempts must be >= 1, got {max_validation_attempts}"
+            )
         self._client = client
         self._include_few_shot = include_few_shot
         self._max_tokens = max_tokens
+        self._rubric_validator = rubric_validator
+        self._max_validation_attempts = max_validation_attempts
 
     def _build_messages(self, task: TaskDescription, num_dimensions: int) -> list[dict[str, str]]:
         system_content = RUBRIC_GENERATION_SYSTEM.format(num_dimensions=num_dimensions)
@@ -75,29 +84,62 @@ class LLMRubricGenerator(RubricGenerator):
     ) -> DynamicRubric:
         messages = self._build_messages(task, num_dimensions)
         budget = max_tokens if max_tokens is not None else self._max_tokens
+        attempts = self._max_validation_attempts if self._rubric_validator else 1
+        last_validation_summary = ""
 
-        try:
-            rubric = await self._client.generate_structured(
-                messages,
-                DynamicRubric,
-                temperature=temperature,
-                max_tokens=budget,
+        for attempt in range(1, attempts + 1):
+            try:
+                rubric = await self._client.generate_structured(
+                    messages,
+                    DynamicRubric,
+                    temperature=temperature,
+                    max_tokens=budget,
+                )
+            except Exception as exc:
+                raise RubricGenerationError(
+                    f"Failed to generate rubric for task {task.task_id}: {exc}",
+                    context={"task_id": task.task_id, "instruction": task.instruction[:200]},
+                ) from exc
+
+            rubric = self._validate_rubric(rubric, task)
+
+            if self._rubric_validator is None:
+                logger.info(
+                    "Generated rubric for task %s with %d dimensions: %s",
+                    task.task_id,
+                    len(rubric.dimensions),
+                    rubric.dimension_names,
+                )
+                return rubric
+
+            validation = await self._rubric_validator.validate(rubric, task)
+            if validation.valid:
+                logger.info(
+                    "Generated valid rubric for task %s on attempt %d/%d: %s",
+                    task.task_id,
+                    attempt,
+                    attempts,
+                    rubric.dimension_names,
+                )
+                return rubric
+
+            last_validation_summary = validation.summary()
+            logger.warning(
+                "Rubric validation failed for task %s on attempt %d/%d: %s",
+                task.task_id,
+                attempt,
+                attempts,
+                last_validation_summary,
             )
-        except Exception as exc:
-            raise RubricGenerationError(
-                f"Failed to generate rubric for task {task.task_id}: {exc}",
-                context={"task_id": task.task_id, "instruction": task.instruction[:200]},
-            ) from exc
 
-        rubric = self._validate_rubric(rubric, task)
-
-        logger.info(
-            "Generated rubric for task %s with %d dimensions: %s",
-            task.task_id,
-            len(rubric.dimensions),
-            rubric.dimension_names,
+        raise RubricGenerationError(
+            f"Generated rubric failed validation after {attempts} attempt(s)",
+            context={
+                "task_id": task.task_id,
+                "instruction": task.instruction[:200],
+                "last_validation_summary": last_validation_summary,
+            },
         )
-        return rubric
 
     @staticmethod
     def _validate_rubric(rubric: DynamicRubric, task: TaskDescription) -> DynamicRubric:
