@@ -32,6 +32,13 @@ Stability evaluation:
     By default, the script runs evaluation 10 times against the same persisted
     rubric and writes a stability report. Set ADARUBRIC_EVAL_RUNS to change the
     repeat count.
+
+Rubric validation:
+    Rubric generation uses AdaRubric paper validation by default. Set
+    ADARUBRIC_VALIDATE_RUBRIC=0 to disable it. Configure embeddings with
+    ADARUBRIC_EMBEDDING_MODEL, ADARUBRIC_EMBEDDING_BASE_URL, and
+    ADARUBRIC_EMBEDDING_API_KEY. Set ADARUBRIC_VALIDATION_ATTEMPTS to change the
+    default retry limit of 10.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ from adarubric.filter.threshold import (
     DimensionAwareFilter,
 )
 from adarubric.generator.llm_generator import LLMRubricGenerator
+from adarubric.generator.validation import OpenAIEmbeddingProvider, RubricValidator
 from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +99,10 @@ def _use_jiawen_dataset() -> bool:
     return _bool_env("ADARUBRIC_USE_JIAWEN_DATA", default=JIAWEN_DATASET_ROOT.exists())
 
 
+def _use_rubric_validation() -> bool:
+    return _bool_env("ADARUBRIC_VALIDATE_RUBRIC", default=True)
+
+
 def _report_path_from_env() -> Path:
     configured = os.environ.get("ADARUBRIC_REPORT_PATH")
     if configured:
@@ -110,6 +122,19 @@ def _eval_runs_from_env() -> int:
     if runs < 1:
         raise ValueError(f"ADARUBRIC_EVAL_RUNS must be >= 1, got {runs}")
     return runs
+
+
+def _validation_attempts_from_env() -> int:
+    configured = os.environ.get("ADARUBRIC_VALIDATION_ATTEMPTS", "10")
+    try:
+        attempts = int(configured)
+    except ValueError:
+        raise ValueError(
+            f"ADARUBRIC_VALIDATION_ATTEMPTS must be an integer, got {configured!r}"
+        ) from None
+    if attempts < 1:
+        raise ValueError(f"ADARUBRIC_VALIDATION_ATTEMPTS must be >= 1, got {attempts}")
+    return attempts
 
 
 def _max_trajectories_from_env() -> int | None:
@@ -172,6 +197,26 @@ def load_jiawen_task_and_trajectories() -> tuple[TaskDescription, list[Trajector
         f"{len(selected)} trajectory/trajectories"
     )
     return task, selected
+
+
+def build_rubric_validator() -> RubricValidator | None:
+    if not _use_rubric_validation():
+        print("Rubric validation disabled")
+        return None
+
+    embedding_model = os.environ.get("ADARUBRIC_EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_base_url = os.environ.get("ADARUBRIC_EMBEDDING_BASE_URL")
+    embedding_api_key = os.environ.get("ADARUBRIC_EMBEDDING_API_KEY") or os.environ.get(
+        "OPENAI_API_KEY"
+    )
+    print(f"Rubric validation enabled with embedding model: {embedding_model}")
+    return RubricValidator(
+        OpenAIEmbeddingProvider(
+            model=embedding_model,
+            base_url=embedding_base_url,
+            api_key=embedding_api_key,
+        )
+    )
 
 
 async def load_or_generate_rubric(
@@ -409,14 +454,24 @@ async def main() -> None:
     else:
         print("Using built-in supply-chain demo task and trajectories")
 
+    rubric_path = _rubric_path_from_env(default_rubric_path)
+    should_generate_rubric = _should_regenerate_rubric() or not rubric_path.exists()
+
     client = OpenAIClient(
         model=os.environ.get("ADARUBRIC_MODEL", "gpt-4o"),
         base_url=os.environ.get("ADARUBRIC_BASE_URL"),
         api_key=os.environ.get("ADARUBRIC_API_KEY") or os.environ.get("OPENAI_API_KEY"),
     )
 
+    rubric_validator = build_rubric_validator() if should_generate_rubric else None
+    if rubric_validator is None and not should_generate_rubric:
+        print("Existing rubric will be loaded; generation validation skipped")
     pipeline = AdaRubricPipeline(
-        generator=LLMRubricGenerator(client),
+        generator=LLMRubricGenerator(
+            client,
+            rubric_validator=rubric_validator,
+            max_validation_attempts=_validation_attempts_from_env(),
+        ),
         evaluator=LLMTrajectoryEvaluator(
             client,
             aggregator=ConfidenceNormalizedAggregator(recency_decay=1.0),
@@ -427,7 +482,6 @@ async def main() -> None:
         ]),
     )
 
-    rubric_path = _rubric_path_from_env(default_rubric_path)
     rubric = await load_or_generate_rubric(
         pipeline,
         task,
