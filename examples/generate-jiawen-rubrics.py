@@ -18,10 +18,12 @@ Optional settings:
     ADARUBRIC_JIAWEN_WORKBOOK
     ADARUBRIC_RUBRIC_PATH
     ADARUBRIC_EVIDENCE_PATH
+    ADARUBRIC_RAW_RESPONSE_PATH
     ADARUBRIC_NUM_DIMENSIONS
     ADARUBRIC_TEMPERATURE
     ADARUBRIC_MAX_TOKENS
     ADARUBRIC_INCLUDE_FEW_SHOT
+    ADARUBRIC_REPAIR_INVALID_JSON
     ADARUBRIC_VALIDATE_RUBRIC
     ADARUBRIC_VALIDATION_ATTEMPTS
     ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST
@@ -38,6 +40,8 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from adarubric import DynamicRubric, TaskDescription, Trajectory
 from adarubric.core.exceptions import RubricGenerationError
 from adarubric.generator.prompts import (
@@ -46,6 +50,7 @@ from adarubric.generator.prompts import (
     RUBRIC_GENERATION_USER,
 )
 from adarubric.generator.validation import OpenAIEmbeddingProvider, RubricValidator
+from adarubric.llm.json_extract import extract_json_substring
 from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +64,9 @@ DEFAULT_WORKBOOK = (
 DEFAULT_RUBRIC_PATH = PROJECT_ROOT / "docs" / "rubrics" / "jiawen_gui_initial_rubric.json"
 DEFAULT_EVIDENCE_PATH = (
     PROJECT_ROOT / "docs" / "rubrics" / "jiawen_gui_initial_rubric.evidence.md"
+)
+DEFAULT_RAW_RESPONSE_PATH = (
+    PROJECT_ROOT / "docs" / "rubrics" / "jiawen_gui_initial_rubric.raw_response.txt"
 )
 
 TITLE_PATTERN = re.compile(r"《([^》]+)》")
@@ -92,6 +100,41 @@ JIAWEN_USER_EXTENSION = """\
   permission dialogs, advertising, loading states, identity verification, and
   premature termination.
 - Return exactly {num_dimensions} dimensions."""
+
+RUBRIC_JSON_CONTRACT = """\
+You MUST return only one valid JSON object. Do not use markdown fences, comments,
+or explanatory prose outside the JSON.
+
+The JSON object must have this shape:
+{{
+  "task_id": "same task id as provided",
+  "dimensions": [
+    {{
+      "name": "ConcisePascalCaseName",
+      "description": "at least 10 characters",
+      "weight": 0.2,
+      "scoring_criteria": {{
+        "1": "concrete behavior for score 1",
+        "2": "concrete behavior for score 2",
+        "3": "concrete behavior for score 3",
+        "4": "concrete behavior for score 4",
+        "5": "concrete behavior for score 5"
+      }}
+    }}
+  ],
+  "generation_rationale": "brief rationale"
+}}
+
+Rules:
+- dimensions must contain exactly {num_dimensions} objects.
+- dimension weights must sum to 1.0.
+- scoring_criteria must contain exactly string keys "1", "2", "3", "4", "5".
+- do not include any observed volatile title from the evidence."""
+
+JSON_REPAIR_SYSTEM = """\
+You repair malformed rubric outputs into valid JSON.
+Return only one valid JSON object and preserve the intended rubric content.
+Do not add markdown fences, comments, or explanatory prose."""
 
 
 def _bool_env(name: str, *, default: bool) -> bool:
@@ -373,7 +416,11 @@ def build_messages(
         calibration_contrast=calibration_contrast,
         num_dimensions=num_dimensions,
     )
-    user_content += "\n\nGenerate the evaluation rubric now."
+    user_content += (
+        "\n\n"
+        + RUBRIC_JSON_CONTRACT.format(num_dimensions=num_dimensions)
+        + "\n\nGenerate the evaluation rubric now."
+    )
 
     return [
         {"role": "system", "content": system_content},
@@ -402,6 +449,11 @@ def _evidence_from_messages(messages: list[dict[str, str]], workbook_path: Path)
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _write_raw_response(path: Path, *, stage: str, raw: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"## {stage}\n\n{raw.rstrip()}\n", encoding="utf-8")
+
+
 def _rubric_text(rubric: DynamicRubric) -> str:
     return rubric.model_dump_json(indent=2)
 
@@ -417,6 +469,74 @@ def _correct_task_id(rubric: DynamicRubric, task: TaskDescription) -> DynamicRub
     if rubric.task_id == task.task_id:
         return rubric
     return rubric.model_copy(update={"task_id": task.task_id})
+
+
+def _parse_rubric_json(raw: str) -> DynamicRubric:
+    extracted = extract_json_substring(raw)
+    return DynamicRubric.model_validate_json(extracted)
+
+
+async def _repair_rubric_json(
+    client: OpenAIClient,
+    *,
+    raw: str,
+    task: TaskDescription,
+    num_dimensions: int,
+    max_tokens: int,
+    raw_response_path: Path,
+) -> DynamicRubric:
+    repair_messages = [
+        {"role": "system", "content": JSON_REPAIR_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                RUBRIC_JSON_CONTRACT.format(num_dimensions=num_dimensions)
+                + "\n\nThe task_id must be: "
+                + task.task_id
+                + "\n\nMalformed rubric output to repair:\n"
+                + raw
+            ),
+        },
+    ]
+    repaired = await client.generate_text(
+        repair_messages,
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+    _write_raw_response(raw_response_path, stage="json_repair_raw_response", raw=repaired)
+    return _parse_rubric_json(repaired)
+
+
+async def _generate_rubric_json(
+    client: OpenAIClient,
+    *,
+    messages: list[dict[str, str]],
+    task: TaskDescription,
+    num_dimensions: int,
+    temperature: float,
+    max_tokens: int,
+    raw_response_path: Path,
+) -> DynamicRubric:
+    raw = await client.generate_text(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    _write_raw_response(raw_response_path, stage="rubric_raw_response", raw=raw)
+
+    try:
+        return _parse_rubric_json(raw)
+    except (ValidationError, json.JSONDecodeError, ValueError):
+        if not _bool_env("ADARUBRIC_REPAIR_INVALID_JSON", default=True):
+            raise
+        return await _repair_rubric_json(
+            client,
+            raw=raw,
+            task=task,
+            num_dimensions=num_dimensions,
+            max_tokens=max_tokens,
+            raw_response_path=raw_response_path,
+        )
 
 
 def build_validator() -> RubricValidator | None:
@@ -454,18 +574,28 @@ async def generate_rubric(
     attempts = _int_env("ADARUBRIC_VALIDATION_ATTEMPTS", default=10)
     temperature = _float_env("ADARUBRIC_TEMPERATURE", default=0.0)
     max_tokens = _int_env("ADARUBRIC_MAX_TOKENS", default=4096)
+    raw_response_path = _path_env("ADARUBRIC_RAW_RESPONSE_PATH", default=DEFAULT_RAW_RESPONSE_PATH)
     observed_titles = _extract_observed_titles(trajectories)
     last_error = ""
 
     try:
         for attempt in range(1, attempts + 1):
             print(f"Generating Jiawen rubric attempt {attempt}/{attempts}")
-            rubric = await client.generate_structured(
-                messages,
-                DynamicRubric,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            try:
+                rubric = await _generate_rubric_json(
+                    client,
+                    messages=messages,
+                    task=task,
+                    num_dimensions=num_dimensions,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    raw_response_path=raw_response_path,
+                )
+            except Exception as exc:
+                last_error = f"invalid JSON rubric output: {exc}"
+                print(f"Rejected rubric: {last_error}")
+                continue
+
             rubric = _correct_task_id(rubric, task)
 
             if len(rubric.dimensions) != num_dimensions:
@@ -496,7 +626,7 @@ async def generate_rubric(
 
         raise RubricGenerationError(
             f"Failed to generate a valid Jiawen rubric after {attempts} attempt(s)",
-            context={"last_error": last_error},
+            context={"last_error": last_error, "raw_response_path": str(raw_response_path)},
         )
     finally:
         await client.close()
