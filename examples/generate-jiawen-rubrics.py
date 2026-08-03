@@ -21,6 +21,7 @@ Optional settings:
     ADARUBRIC_NUM_DIMENSIONS
     ADARUBRIC_TEMPERATURE
     ADARUBRIC_MAX_TOKENS
+    ADARUBRIC_INCLUDE_FEW_SHOT
     ADARUBRIC_VALIDATE_RUBRIC
     ADARUBRIC_VALIDATION_ATTEMPTS
     ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST
@@ -39,6 +40,11 @@ from pathlib import Path
 
 from adarubric import DynamicRubric, TaskDescription, Trajectory
 from adarubric.core.exceptions import RubricGenerationError
+from adarubric.generator.prompts import (
+    RUBRIC_GENERATION_FEW_SHOT,
+    RUBRIC_GENERATION_SYSTEM,
+    RUBRIC_GENERATION_USER,
+)
 from adarubric.generator.validation import OpenAIEmbeddingProvider, RubricValidator
 from adarubric.llm.openai_client import OpenAIClient
 
@@ -57,42 +63,16 @@ DEFAULT_EVIDENCE_PATH = (
 
 TITLE_PATTERN = re.compile(r"《([^》]+)》")
 
-RUBRIC_SYSTEM_PROMPT = """\
-You are an expert evaluation rubric designer for mobile GUI agent trajectories.
+JIAWEN_SYSTEM_EXTENSION = """\
+### Jiawen GUI Evidence Extension
 
-Given a task description and observable environment evidence, produce a dynamic
-evaluation rubric with exactly {num_dimensions} orthogonal dimensions and a
-5-point scoring scale for each dimension.
+When supplemental environment evidence is provided, use it only to identify
+observable GUI states and completion boundaries. Do not hard-code volatile
+observed content such as a currently ranked title; evaluate whether the agent
+selects the current ranked target at evaluation time."""
 
-Design constraints:
-1. Task-specific: every dimension must come from the user's task requirement.
-2. Observable: every dimension must be assessable from Thought, Action,
-   Observation, and Final Answer text.
-3. Non-overfitted: do not copy trajectory IDs, coordinates, step counts, or
-   transient UI content into the rubric.
-4. Dynamic target handling: if the task asks for a ranked/current item, the
-   rubric must evaluate whether the agent selects the current ranked item at
-   evaluation time. Do not hard-code an observed title, product, person, or
-   other volatile answer from the evidence.
-5. Orthogonal: dimensions should cover distinct aspects of performance.
-6. Calibrated: Score 3 is an acceptable but incomplete baseline; Score 1 is
-   fundamentally broken; Score 5 is full, robust completion.
-7. Weighted: assign positive weights reflecting task importance. The weights
-   must sum to 1.0.
-
-Output a JSON object matching the requested schema."""
-
-RUBRIC_USER_PROMPT = """\
-### Task Information
-
-- Task ID: {task_id}
-- Instruction: {instruction}
-- Domain: {domain}
-- Complexity: {complexity}
-- Expected Tools: {expected_tools}
-- Additional Context: {context}
-
-### Observable Environment Evidence
+JIAWEN_USER_EXTENSION = """\
+### Supplemental Observable Environment Evidence
 
 {environment_evidence}
 
@@ -371,22 +351,32 @@ def build_messages(
 ) -> list[dict[str, str]]:
     environment_evidence = _summarize_environment(trajectories)
     calibration_contrast = _summarize_calibration_contrast(trajectories)
-    user_content = RUBRIC_USER_PROMPT.format(
+    system_content = RUBRIC_GENERATION_SYSTEM.format(num_dimensions=num_dimensions)
+    if _bool_env("ADARUBRIC_INCLUDE_FEW_SHOT", default=False):
+        system_content += "\n\n" + RUBRIC_GENERATION_FEW_SHOT
+    system_content += "\n\n" + JIAWEN_SYSTEM_EXTENSION
+
+    base_user_content = RUBRIC_GENERATION_USER.format(
         task_id=task.task_id,
         instruction=task.instruction,
         domain=task.domain or "General",
         complexity=task.complexity.value,
         expected_tools=", ".join(task.expected_tools) if task.expected_tools else "Not specified",
         context=json.dumps(task.context, ensure_ascii=False) if task.context else "None",
+    )
+    final_instruction = "Generate the evaluation rubric now."
+    if base_user_content.endswith(final_instruction):
+        base_user_content = base_user_content[: -len(final_instruction)].rstrip()
+
+    user_content = base_user_content + "\n\n" + JIAWEN_USER_EXTENSION.format(
         environment_evidence=environment_evidence,
         calibration_contrast=calibration_contrast,
         num_dimensions=num_dimensions,
     )
+    user_content += "\n\nGenerate the evaluation rubric now."
+
     return [
-        {
-            "role": "system",
-            "content": RUBRIC_SYSTEM_PROMPT.format(num_dimensions=num_dimensions),
-        },
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
 
@@ -397,6 +387,7 @@ def _evidence_from_messages(messages: list[dict[str, str]], workbook_path: Path)
         "",
         f"- Workbook: `{workbook_path}`",
         f"- Model: `{os.environ.get('ADARUBRIC_MODEL', 'gpt-4o')}`",
+        f"- AdaRubric few-shot enabled: `{_bool_env('ADARUBRIC_INCLUDE_FEW_SHOT', default=False)}`",
         (
             "- Calibration contrast enabled: "
             f"`{_bool_env('ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST', default=False)}`"
