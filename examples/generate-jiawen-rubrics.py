@@ -14,7 +14,13 @@ PowerShell example:
     $env:ADARUBRIC_MODEL="your-local-model-name"
     .venv\\Scripts\\python examples\\generate-jiawen-rubrics.py
 
-Optional settings:
+Experiment settings are read from:
+    examples/jiawen_rubric_config.json
+
+You can choose another config file with:
+    .venv\\Scripts\\python examples\\generate-jiawen-rubrics.py --config path\\to\\config.json
+
+Environment variables are still supported as temporary overrides:
     ADARUBRIC_JIAWEN_WORKBOOK
     ADARUBRIC_RUBRIC_PATH
     ADARUBRIC_EVIDENCE_PATH
@@ -32,6 +38,7 @@ Optional settings:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -39,6 +46,7 @@ import re
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -55,6 +63,7 @@ from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 JIAWEN_DATASET_ROOT = PROJECT_ROOT / "jiawen-dataset"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "examples" / "jiawen_rubric_config.json"
 DEFAULT_WORKBOOK = (
     JIAWEN_DATASET_ROOT
     / "outputs"
@@ -70,6 +79,7 @@ DEFAULT_RAW_RESPONSE_PATH = (
 )
 
 TITLE_PATTERN = re.compile(r"《([^》]+)》")
+Config = dict[str, Any]
 
 JIAWEN_SYSTEM_EXTENSION = """\
 ### Jiawen GUI Evidence Extension
@@ -137,6 +147,91 @@ Return only one valid JSON object and preserve the intended rubric content.
 Do not add markdown fences, comments, or explanatory prose."""
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate an initial AdaRubric rubric for the Jiawen GUI dataset."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"JSON config path. Defaults to {DEFAULT_CONFIG_PATH}",
+    )
+    return parser.parse_args()
+
+
+def load_config(path: Path) -> Config:
+    if not path.exists():
+        print(f"Config file not found, using built-in defaults: {path}")
+        return {}
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file must contain a JSON object: {path}")
+    return data
+
+
+def _setting(config: Config, key: str, env_name: str, default: Any) -> Any:
+    if env_name in os.environ:
+        return os.environ[env_name]
+    return config.get(key, default)
+
+
+def _bool_setting(config: Config, key: str, env_name: str, *, default: bool) -> bool:
+    configured = _setting(config, key, env_name, default)
+    if isinstance(configured, bool):
+        return configured
+    if configured is None:
+        return default
+    return str(configured).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _int_setting(
+    config: Config,
+    key: str,
+    env_name: str,
+    *,
+    default: int,
+    minimum: int = 1,
+) -> int:
+    configured = _setting(config, key, env_name, default)
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} / {env_name} must be an integer, got {configured!r}") from None
+    if value < minimum:
+        raise ValueError(f"{key} / {env_name} must be >= {minimum}, got {value}")
+    return value
+
+
+def _float_setting(config: Config, key: str, env_name: str, *, default: float) -> float:
+    configured = _setting(config, key, env_name, default)
+    try:
+        return float(configured)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} / {env_name} must be a float, got {configured!r}") from None
+
+
+def _path_setting(config: Config, key: str, env_name: str, *, default: Path) -> Path:
+    configured = _setting(config, key, env_name, None)
+    if not configured:
+        return default
+    path = Path(str(configured))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _list_setting(config: Config, key: str, env_name: str) -> list[str]:
+    configured = os.environ[env_name] if env_name in os.environ else config.get(key, [])
+
+    if configured is None or configured == "":
+        return []
+    if isinstance(configured, str):
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    if isinstance(configured, list):
+        return [str(item).strip() for item in configured if str(item).strip()]
+    raise ValueError(f"{key} / {env_name} must be a list or comma-separated string")
+
+
 def _bool_env(name: str, *, default: bool) -> bool:
     configured = os.environ.get(name)
     if configured is None:
@@ -175,7 +270,7 @@ def _path_env(name: str, *, default: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def _load_jiawen_objects() -> tuple[TaskDescription, list[Trajectory], Path]:
+def _load_jiawen_objects(config: Config) -> tuple[TaskDescription, list[Trajectory], Path]:
     if not JIAWEN_DATASET_ROOT.exists():
         raise FileNotFoundError(f"Jiawen dataset directory not found: {JIAWEN_DATASET_ROOT}")
 
@@ -193,12 +288,17 @@ def _load_jiawen_objects() -> tuple[TaskDescription, list[Trajectory], Path]:
             ) from exc
         raise
 
-    workbook_path = _path_env("ADARUBRIC_JIAWEN_WORKBOOK", default=DEFAULT_WORKBOOK)
+    workbook_path = _path_setting(
+        config,
+        "workbook_path",
+        "ADARUBRIC_JIAWEN_WORKBOOK",
+        default=DEFAULT_WORKBOOK,
+    )
     tasks_by_id, trajectories = load_objects(workbook_path=workbook_path)
     if not tasks_by_id:
         raise ValueError("jiawen-dataset returned no TaskDescription objects")
 
-    task_id = os.environ.get("ADARUBRIC_TASK_ID")
+    task_id = _setting(config, "task_id", "ADARUBRIC_TASK_ID", None)
     if task_id:
         if task_id not in tasks_by_id:
             available = ", ".join(sorted(tasks_by_id))
@@ -341,12 +441,16 @@ def _completion_pattern(trajectory: Trajectory) -> str:
     return "unknown: useful trajectory evidence exists, but the completion boundary is ambiguous"
 
 
-def _calibration_trajectories(trajectories: list[Trajectory]) -> list[Trajectory]:
-    configured = os.environ.get("ADARUBRIC_CALIBRATION_TRAJECTORY_IDS", "").strip()
-    if not configured:
+def _calibration_trajectories(trajectories: list[Trajectory], config: Config) -> list[Trajectory]:
+    requested = set(
+        _list_setting(
+            config,
+            "calibration_trajectory_ids",
+            "ADARUBRIC_CALIBRATION_TRAJECTORY_IDS",
+        )
+    )
+    if not requested:
         return []
-
-    requested = {item.strip() for item in configured.split(",") if item.strip()}
     selected = [
         trajectory
         for trajectory in trajectories
@@ -361,14 +465,19 @@ def _calibration_trajectories(trajectories: list[Trajectory]) -> list[Trajectory
     return selected
 
 
-def _summarize_calibration_contrast(trajectories: list[Trajectory]) -> str:
-    if not _bool_env("ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST", default=False):
+def _summarize_calibration_contrast(trajectories: list[Trajectory], config: Config) -> str:
+    if not _bool_setting(
+        config,
+        "include_calibration_contrast",
+        "ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST",
+        default=False,
+    ):
         return (
             "No calibration trajectories are provided by default. Generate the "
             "initial rubric from the task and reusable environment evidence only."
         )
 
-    selected = _calibration_trajectories(trajectories)
+    selected = _calibration_trajectories(trajectories, config)
     if not selected:
         return (
             "Calibration contrast was requested, but no explicit "
@@ -390,12 +499,13 @@ def build_messages(
     task: TaskDescription,
     trajectories: list[Trajectory],
     *,
+    config: Config,
     num_dimensions: int,
 ) -> list[dict[str, str]]:
     environment_evidence = _summarize_environment(trajectories)
-    calibration_contrast = _summarize_calibration_contrast(trajectories)
+    calibration_contrast = _summarize_calibration_contrast(trajectories, config)
     system_content = RUBRIC_GENERATION_SYSTEM.format(num_dimensions=num_dimensions)
-    if _bool_env("ADARUBRIC_INCLUDE_FEW_SHOT", default=False):
+    if _bool_setting(config, "include_few_shot", "ADARUBRIC_INCLUDE_FEW_SHOT", default=False):
         system_content += "\n\n" + RUBRIC_GENERATION_FEW_SHOT
     system_content += "\n\n" + JIAWEN_SYSTEM_EXTENSION
 
@@ -428,17 +538,36 @@ def build_messages(
     ]
 
 
-def _evidence_from_messages(messages: list[dict[str, str]], workbook_path: Path) -> str:
+def _evidence_from_messages(
+    messages: list[dict[str, str]],
+    workbook_path: Path,
+    config: Config,
+) -> str:
+    include_few_shot = _bool_setting(
+        config,
+        "include_few_shot",
+        "ADARUBRIC_INCLUDE_FEW_SHOT",
+        default=False,
+    )
+    include_calibration_contrast = _bool_setting(
+        config,
+        "include_calibration_contrast",
+        "ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST",
+        default=False,
+    )
+    calibration_ids = _list_setting(
+        config,
+        "calibration_trajectory_ids",
+        "ADARUBRIC_CALIBRATION_TRAJECTORY_IDS",
+    )
     lines = [
         "# Jiawen GUI Initial Rubric Generation Evidence",
         "",
         f"- Workbook: `{workbook_path}`",
         f"- Model: `{os.environ.get('ADARUBRIC_MODEL', 'gpt-4o')}`",
-        f"- AdaRubric few-shot enabled: `{_bool_env('ADARUBRIC_INCLUDE_FEW_SHOT', default=False)}`",
-        (
-            "- Calibration contrast enabled: "
-            f"`{_bool_env('ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST', default=False)}`"
-        ),
+        f"- AdaRubric few-shot enabled: `{include_few_shot}`",
+        f"- Calibration contrast enabled: `{include_calibration_contrast}`",
+        f"- Calibration trajectory ids: `{calibration_ids}`",
         "",
     ]
     for message in messages:
@@ -510,6 +639,7 @@ async def _repair_rubric_json(
 async def _generate_rubric_json(
     client: OpenAIClient,
     *,
+    config: Config,
     messages: list[dict[str, str]],
     task: TaskDescription,
     num_dimensions: int,
@@ -527,7 +657,12 @@ async def _generate_rubric_json(
     try:
         return _parse_rubric_json(raw)
     except (ValidationError, json.JSONDecodeError, ValueError):
-        if not _bool_env("ADARUBRIC_REPAIR_INVALID_JSON", default=True):
+        if not _bool_setting(
+            config,
+            "repair_invalid_json",
+            "ADARUBRIC_REPAIR_INVALID_JSON",
+            default=True,
+        ):
             raise
         return await _repair_rubric_json(
             client,
@@ -539,20 +674,27 @@ async def _generate_rubric_json(
         )
 
 
-def build_validator() -> RubricValidator | None:
-    if not _bool_env("ADARUBRIC_VALIDATE_RUBRIC", default=True):
+def build_validator(config: Config) -> RubricValidator | None:
+    if not _bool_setting(config, "validate_rubric", "ADARUBRIC_VALIDATE_RUBRIC", default=True):
         return None
 
     embedding_api_key = (
-        os.environ.get("ADARUBRIC_EMBEDDING_API_KEY")
+        str(_setting(config, "embedding_api_key", "ADARUBRIC_EMBEDDING_API_KEY", "") or "")
         or os.environ.get("ADARUBRIC_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or "EMPTY"
     )
     return RubricValidator(
         OpenAIEmbeddingProvider(
-            model=os.environ.get("ADARUBRIC_EMBEDDING_MODEL", "text-embedding-3-small"),
-            base_url=os.environ.get("ADARUBRIC_EMBEDDING_BASE_URL"),
+            model=str(
+                _setting(
+                    config,
+                    "embedding_model",
+                    "ADARUBRIC_EMBEDDING_MODEL",
+                    "text-embedding-3-small",
+                )
+            ),
+            base_url=_setting(config, "embedding_base_url", "ADARUBRIC_EMBEDDING_BASE_URL", None),
             api_key=embedding_api_key,
         )
     )
@@ -563,18 +705,33 @@ async def generate_rubric(
     task: TaskDescription,
     trajectories: list[Trajectory],
     messages: list[dict[str, str]],
+    config: Config,
     num_dimensions: int,
 ) -> DynamicRubric:
     client = OpenAIClient(
-        model=os.environ.get("ADARUBRIC_MODEL", "gpt-4o"),
-        base_url=os.environ.get("ADARUBRIC_BASE_URL"),
-        api_key=os.environ.get("ADARUBRIC_API_KEY") or os.environ.get("OPENAI_API_KEY") or "EMPTY",
+        model=str(_setting(config, "model", "ADARUBRIC_MODEL", "gpt-4o")),
+        base_url=_setting(config, "base_url", "ADARUBRIC_BASE_URL", None),
+        api_key=str(
+            _setting(config, "api_key", "ADARUBRIC_API_KEY", None)
+            or os.environ.get("OPENAI_API_KEY")
+            or "EMPTY"
+        ),
     )
-    validator = build_validator()
-    attempts = _int_env("ADARUBRIC_VALIDATION_ATTEMPTS", default=10)
-    temperature = _float_env("ADARUBRIC_TEMPERATURE", default=0.0)
-    max_tokens = _int_env("ADARUBRIC_MAX_TOKENS", default=4096)
-    raw_response_path = _path_env("ADARUBRIC_RAW_RESPONSE_PATH", default=DEFAULT_RAW_RESPONSE_PATH)
+    validator = build_validator(config)
+    attempts = _int_setting(
+        config,
+        "validation_attempts",
+        "ADARUBRIC_VALIDATION_ATTEMPTS",
+        default=10,
+    )
+    temperature = _float_setting(config, "temperature", "ADARUBRIC_TEMPERATURE", default=0.0)
+    max_tokens = _int_setting(config, "max_tokens", "ADARUBRIC_MAX_TOKENS", default=4096)
+    raw_response_path = _path_setting(
+        config,
+        "raw_response_path",
+        "ADARUBRIC_RAW_RESPONSE_PATH",
+        default=DEFAULT_RAW_RESPONSE_PATH,
+    )
     observed_titles = _extract_observed_titles(trajectories)
     last_error = ""
 
@@ -584,6 +741,7 @@ async def generate_rubric(
             try:
                 rubric = await _generate_rubric_json(
                     client,
+                    config=config,
                     messages=messages,
                     task=task,
                     num_dimensions=num_dimensions,
@@ -633,25 +791,53 @@ async def generate_rubric(
 
 
 async def main() -> None:
-    task, trajectories, workbook_path = _load_jiawen_objects()
-    num_dimensions = _int_env("ADARUBRIC_NUM_DIMENSIONS", default=5, minimum=1)
-    rubric_path = _path_env("ADARUBRIC_RUBRIC_PATH", default=DEFAULT_RUBRIC_PATH)
-    evidence_path = _path_env("ADARUBRIC_EVIDENCE_PATH", default=DEFAULT_EVIDENCE_PATH)
+    args = parse_args()
+    config = load_config(args.config)
+    task, trajectories, workbook_path = _load_jiawen_objects(config)
+    num_dimensions = _int_setting(
+        config,
+        "num_dimensions",
+        "ADARUBRIC_NUM_DIMENSIONS",
+        default=5,
+        minimum=1,
+    )
+    rubric_path = _path_setting(
+        config,
+        "rubric_path",
+        "ADARUBRIC_RUBRIC_PATH",
+        default=DEFAULT_RUBRIC_PATH,
+    )
+    evidence_path = _path_setting(
+        config,
+        "evidence_path",
+        "ADARUBRIC_EVIDENCE_PATH",
+        default=DEFAULT_EVIDENCE_PATH,
+    )
 
-    messages = build_messages(task, trajectories, num_dimensions=num_dimensions)
+    messages = build_messages(
+        task,
+        trajectories,
+        config=config,
+        num_dimensions=num_dimensions,
+    )
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.write_text(_evidence_from_messages(messages, workbook_path), encoding="utf-8")
+    evidence_path.write_text(
+        _evidence_from_messages(messages, workbook_path, config),
+        encoding="utf-8",
+    )
 
     rubric = await generate_rubric(
         task=task,
         trajectories=trajectories,
         messages=messages,
+        config=config,
         num_dimensions=num_dimensions,
     )
 
     rubric_path.parent.mkdir(parents=True, exist_ok=True)
     rubric_path.write_text(_rubric_text(rubric) + "\n", encoding="utf-8")
 
+    print(f"Loaded config from {args.config}")
     print(f"Loaded task {task.task_id} with {len(trajectories)} trajectories")
     print(f"Saved generation evidence to {evidence_path}")
     print(f"Saved rubric to {rubric_path}")

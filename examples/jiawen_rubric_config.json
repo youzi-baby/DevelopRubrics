@@ -1,0 +1,19 @@
+{
+  "workbook_path": "jiawen-dataset/outputs/gui_trajectories/mobile_gui_trajectories_qwen.xlsx",
+  "task_id": null,
+  "num_dimensions": 5,
+  "include_few_shot": false,
+  "include_calibration_contrast": false,
+  "calibration_trajectory_ids": [],
+  "rubric_path": "docs/rubrics/jiawen_gui_initial_rubric.json",
+  "evidence_path": "docs/rubrics/jiawen_gui_initial_rubric.evidence.md",
+  "raw_response_path": "docs/rubrics/jiawen_gui_initial_rubric.raw_response.txt",
+  "temperature": 0.0,
+  "max_tokens": 4096,
+  "repair_invalid_json": true,
+  "validate_rubric": true,
+  "validation_attempts": 10,
+  "embedding_model": "text-embedding-3-small",
+  "embedding_base_url": null,
+  "embedding_api_key": ""
+}
