@@ -22,6 +22,8 @@ You can choose another config file with:
 
 Environment variables are still supported as temporary overrides:
     ADARUBRIC_JIAWEN_WORKBOOK
+    ADARUBRIC_PROCESS_ALL_TASKS
+    ADARUBRIC_TASK_IDS
     ADARUBRIC_RUBRIC_PATH
     ADARUBRIC_EVIDENCE_PATH
     ADARUBRIC_RAW_RESPONSE_PATH
@@ -98,17 +100,20 @@ JIAWEN_USER_EXTENSION = """\
 
 {calibration_contrast}
 
-### Rubric Requirements For This Task
+### Rubric Requirements For This Mobile GUI Task
 
-- The task target is the drama that is ranked first on the current TV-drama
-  must-watch ranking page at evaluation time.
-- The rubric may refer to "the current rank-1 drama" or "the target ranked
-  drama", but it must not name a specific observed title.
-- Distinguish complete playback progress from merely reaching the ranking page,
-  merely identifying the rank-1 item, or stopping on a detail/ad/loading page.
+- Derive the target app, target objects, required UI state, and final completion
+  condition from the Task Information rather than from a hard-coded prior task.
+- If the task refers to dynamic content such as "current", "previously watched",
+  "ranked first", "unread", or "all completed" items, evaluate whether the agent
+  handles the content visible at evaluation time. Do not hard-code observed item
+  names from the evidence.
+- Distinguish final task completion from merely reaching a relevant page,
+  identifying candidate items, opening an item, or stopping before the requested
+  operation is finished.
 - Include common mobile-GUI interruptions only when they affect completion:
-  permission dialogs, advertising, loading states, identity verification, and
-  premature termination.
+  permission dialogs, confirmation dialogs, advertising, loading states, identity
+  verification, and premature termination.
 - Return exactly {num_dimensions} dimensions."""
 
 RUBRIC_JSON_CONTRACT = """\
@@ -232,45 +237,46 @@ def _list_setting(config: Config, key: str, env_name: str) -> list[str]:
     raise ValueError(f"{key} / {env_name} must be a list or comma-separated string")
 
 
-def _bool_env(name: str, *, default: bool) -> bool:
-    configured = os.environ.get(name)
-    if configured is None:
-        return default
-    return configured.strip().lower() in {"1", "true", "yes", "y", "on"}
+def _safe_filename_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return safe.strip("._") or "task"
 
 
-def _int_env(name: str, *, default: int, minimum: int = 1) -> int:
-    configured = os.environ.get(name)
-    if configured is None:
-        return default
-    try:
-        value = int(configured)
-    except ValueError:
-        raise ValueError(f"{name} must be an integer, got {configured!r}") from None
-    if value < minimum:
-        raise ValueError(f"{name} must be >= {minimum}, got {value}")
-    return value
+def _path_for_task(path: Path, task_id: str, *, multiple_tasks: bool) -> Path:
+    if not multiple_tasks:
+        return path
+    suffix = _safe_filename_part(task_id)
+    return path.with_name(f"{path.stem}__{suffix}{path.suffix}")
 
 
-def _float_env(name: str, *, default: float) -> float:
-    configured = os.environ.get(name)
-    if configured is None:
-        return default
-    try:
-        return float(configured)
-    except ValueError:
-        raise ValueError(f"{name} must be a float, got {configured!r}") from None
+def _config_for_task_outputs(
+    config: Config,
+    task: TaskDescription,
+    *,
+    multiple_tasks: bool,
+) -> Config:
+    task_config = dict(config)
+    for key, env_name, default in (
+        ("rubric_path", "ADARUBRIC_RUBRIC_PATH", DEFAULT_RUBRIC_PATH),
+        ("evidence_path", "ADARUBRIC_EVIDENCE_PATH", DEFAULT_EVIDENCE_PATH),
+        ("raw_response_path", "ADARUBRIC_RAW_RESPONSE_PATH", DEFAULT_RAW_RESPONSE_PATH),
+    ):
+        path = _path_setting(config, key, env_name, default=default)
+        task_config[key] = str(_path_for_task(path, task.task_id, multiple_tasks=multiple_tasks))
+    return task_config
 
 
-def _path_env(name: str, *, default: Path) -> Path:
-    configured = os.environ.get(name)
-    if not configured:
-        return default
-    path = Path(configured)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+def _task_ids_setting(config: Config) -> list[str]:
+    task_ids = _list_setting(config, "task_ids", "ADARUBRIC_TASK_IDS")
+    legacy_task_id = _setting(config, "task_id", "ADARUBRIC_TASK_ID", None)
+    if legacy_task_id and not task_ids:
+        task_ids = [str(legacy_task_id).strip()]
+    return task_ids
 
 
-def _load_jiawen_objects(config: Config) -> tuple[TaskDescription, list[Trajectory], Path]:
+def _load_jiawen_objects(
+    config: Config,
+) -> tuple[dict[str, TaskDescription], list[Trajectory], Path]:
     if not JIAWEN_DATASET_ROOT.exists():
         raise FileNotFoundError(f"Jiawen dataset directory not found: {JIAWEN_DATASET_ROOT}")
 
@@ -298,19 +304,37 @@ def _load_jiawen_objects(config: Config) -> tuple[TaskDescription, list[Trajecto
     if not tasks_by_id:
         raise ValueError("jiawen-dataset returned no TaskDescription objects")
 
-    task_id = _setting(config, "task_id", "ADARUBRIC_TASK_ID", None)
-    if task_id:
-        if task_id not in tasks_by_id:
-            available = ", ".join(sorted(tasks_by_id))
-            raise ValueError(f"Unknown ADARUBRIC_TASK_ID={task_id!r}. Available: {available}")
-        task = tasks_by_id[task_id]
-    else:
-        task = next(iter(tasks_by_id.values()))
+    return tasks_by_id, trajectories, workbook_path
 
+
+def _select_tasks(config: Config, tasks_by_id: dict[str, TaskDescription]) -> list[TaskDescription]:
+    if _bool_setting(
+        config,
+        "process_all_tasks",
+        "ADARUBRIC_PROCESS_ALL_TASKS",
+        default=True,
+    ):
+        return list(tasks_by_id.values())
+
+    task_ids = _task_ids_setting(config)
+    if not task_ids:
+        return [next(iter(tasks_by_id.values()))]
+
+    missing = [task_id for task_id in task_ids if task_id not in tasks_by_id]
+    if missing:
+        available = ", ".join(sorted(tasks_by_id))
+        raise ValueError(f"Unknown task id(s): {missing}. Available: {available}")
+    return [tasks_by_id[task_id] for task_id in task_ids]
+
+
+def _trajectories_for_task(
+    task: TaskDescription,
+    trajectories: list[Trajectory],
+) -> list[Trajectory]:
     selected = [trajectory for trajectory in trajectories if trajectory.task_id == task.task_id]
     if not selected:
         raise ValueError(f"No trajectories found for task_id={task.task_id}")
-    return task, selected, workbook_path
+    return selected
 
 
 def _all_text(trajectory: Trajectory) -> str:
@@ -346,49 +370,58 @@ def _summarize_environment(trajectories: list[Trajectory]) -> str:
     signals = [
         (
             "Mobile home/app launch",
-            _contains_any(corpus, ["手机主屏幕", "爱奇艺应用图标", "打开应用"]),
-            "The agent can be observed launching the video app from the mobile home screen.",
+            _contains_any(corpus, ["手机主屏幕", "应用图标", "打开应用", "启动应用"]),
+            "The agent can be observed launching an app from the mobile home screen.",
         ),
         (
-            "Video app home and TV-drama channel",
-            _contains_any(corpus, ["首页", "电视剧频道", "电视剧标签", "电视剧"]),
-            "The app home page exposes a TV-drama channel/tab that is relevant to the task.",
+            "App home and navigation",
+            _contains_any(corpus, ["首页", "导航", "底部", "标签", "频道", "我的", "设置"]),
+            "The app can expose home, tab, channel, profile, settings, or menu navigation.",
         ),
         (
-            "Ranking page entry",
-            _contains_any(corpus, ["风云榜", "热播榜", "排行榜"]),
-            "The TV-drama area exposes ranking entry points such as hot/ranking pages.",
-        ),
-        (
-            "Must-watch ranking tab",
-            _contains_any(corpus, ["必看榜"]),
+            "Task-relevant list or content area",
+            _contains_any(
+                corpus,
+                ["列表", "记录", "历史", "播放记录", "收藏", "排行", "搜索", "结果"],
+            ),
             (
-                "The ranking page contains a must-watch tab; it must be selected "
-                "rather than other ranking tabs."
+                "Relevant pages may contain lists, records, history entries, "
+                "search results, or ranked items."
             ),
         ),
         (
-            "Current rank-1 item",
-            _contains_any(corpus, ["排名第一", "排行第一", "榜No.1", "No.1"]),
+            "Target item selection",
+            _contains_any(corpus, ["选中", "点击", "选择", "排名第一", "已看完", "全部", "目标"]),
             (
-                "The target should be derived from the item currently shown as "
-                "rank 1 on the must-watch ranking."
+                "The agent may need to identify and select target items from the "
+                "current visible UI state."
             ),
         ),
         (
-            "Target detail/play page",
-            _contains_any(corpus, ["详情页", "播放页面", "播放详情页", "选集", "第1集"]),
+            "Requested operation",
+            _contains_any(corpus, ["播放", "删除", "清除", "确认", "提交", "完成", "取消", "关闭"]),
             (
-                "After selecting the current rank-1 item, detail/play pages can "
-                "show title, ranking tag, episode selection, and player/ad area."
+                "The requested operation should be completed, not merely prepared "
+                "or partially initiated."
+            ),
+        ),
+        (
+            "Completion or final state",
+            _contains_any(
+                corpus,
+                ["完成", "成功", "无阻塞", "已删除", "未开始", "未完成", "详情页"],
+            ),
+            (
+                "Completion should be judged from the observable final screen, "
+                "final answer, and whether requested changes are visible."
             ),
         ),
         (
             "Completion blockers",
-            _contains_any(corpus, ["广告", "弹窗", "身份核实", "加载", "阻塞", "未开始播放"]),
+            _contains_any(corpus, ["广告", "弹窗", "身份核实", "加载", "阻塞", "权限", "确认弹窗"]),
             (
                 "Common completion blockers include ads, permission dialogs, "
-                "loading states, and identity verification."
+                "confirmation dialogs, loading states, and identity verification."
             ),
         ),
     ]
@@ -407,10 +440,13 @@ def _summarize_environment(trajectories: list[Trajectory]) -> str:
         [
             "",
             "Important anti-overfitting note:",
-            "- Any title observed in the collected trajectories is temporary ranking content.",
             (
-                "- The rubric must evaluate selection of the current rank-1 TV drama, "
-                "not a fixed show name."
+                "- Any concrete item name observed in the collected trajectories "
+                "may be temporary UI content."
+            ),
+            (
+                "- The rubric must evaluate the task's requested dynamic target or operation, "
+                "not a fixed observed item name."
             ),
             (
                 "- Do not include exact coordinates, trajectory IDs, step counts, or "
@@ -423,32 +459,53 @@ def _summarize_environment(trajectories: list[Trajectory]) -> str:
 
 def _completion_pattern(trajectory: Trajectory) -> str:
     text = _all_text(trajectory)
-    if _contains_any(text, ["仅停留在榜单", "未执行点击播放", "未开始播放"]):
+    if _contains_any(text, ["身份核实", "验证", "阻塞", "未观察到", "弹窗", "加载"]):
         return (
-            "partial: reaches the correct ranking context but stops before "
-            "initiating target playback"
-        )
-    if _contains_any(text, ["身份核实", "验证", "阻塞", "未观察到视频正片"]):
-        return (
-            "blocked: reaches the target context but does not show clear playback "
+            "blocked: reaches a relevant task context but does not show clear "
             "completion because of interruption or blocking states"
         )
-    if _contains_any(text, ["播放广告", "播放页面", "详情或播放页面", "第1集", "选集"]):
+    if _contains_any(text, ["未完成", "未执行", "未开始", "仅停留", "停留在"]):
         return (
-            "near-complete: selects the current rank-1 item and reaches a target "
-            "detail/playback context"
+            "partial: reaches a relevant task context but stops before completing "
+            "the requested operation"
+        )
+    if _contains_any(text, ["成功", "完成", "无阻塞", "已删除", "正在播放", "流程顺畅"]):
+        return (
+            "near-complete or complete: performs the requested task path and "
+            "reaches an observable completion state"
         )
     return "unknown: useful trajectory evidence exists, but the completion boundary is ambiguous"
 
 
-def _calibration_trajectories(trajectories: list[Trajectory], config: Config) -> list[Trajectory]:
-    requested = set(
+def _calibration_ids_for_task(trajectories: list[Trajectory], config: Config) -> set[str]:
+    task_id = trajectories[0].task_id if trajectories else ""
+    by_task = config.get("calibration_trajectory_ids_by_task", {})
+    use_task_specific_ids = (
+        isinstance(by_task, dict)
+        and task_id in by_task
+        and "ADARUBRIC_CALIBRATION_TRAJECTORY_IDS" not in os.environ
+    )
+    if use_task_specific_ids:
+        configured = by_task[task_id]
+        if isinstance(configured, str):
+            return {item.strip() for item in configured.split(",") if item.strip()}
+        if isinstance(configured, list):
+            return {str(item).strip() for item in configured if str(item).strip()}
+        raise ValueError(
+            f"calibration_trajectory_ids_by_task[{task_id!r}] must be a list or string"
+        )
+
+    return set(
         _list_setting(
             config,
             "calibration_trajectory_ids",
             "ADARUBRIC_CALIBRATION_TRAJECTORY_IDS",
         )
     )
+
+
+def _calibration_trajectories(trajectories: list[Trajectory], config: Config) -> list[Trajectory]:
+    requested = _calibration_ids_for_task(trajectories, config)
     if not requested:
         return []
     selected = [
@@ -542,6 +599,7 @@ def _evidence_from_messages(
     messages: list[dict[str, str]],
     workbook_path: Path,
     config: Config,
+    trajectories: list[Trajectory],
 ) -> str:
     include_few_shot = _bool_setting(
         config,
@@ -555,11 +613,7 @@ def _evidence_from_messages(
         "ADARUBRIC_INCLUDE_CALIBRATION_CONTRAST",
         default=False,
     )
-    calibration_ids = _list_setting(
-        config,
-        "calibration_trajectory_ids",
-        "ADARUBRIC_CALIBRATION_TRAJECTORY_IDS",
-    )
+    calibration_ids = sorted(_calibration_ids_for_task(trajectories, config))
     lines = [
         "# Jiawen GUI Initial Rubric Generation Evidence",
         "",
@@ -793,7 +847,9 @@ async def generate_rubric(
 async def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    task, trajectories, workbook_path = _load_jiawen_objects(config)
+    tasks_by_id, all_trajectories, workbook_path = _load_jiawen_objects(config)
+    tasks = _select_tasks(config, tasks_by_id)
+    multiple_tasks = len(tasks) > 1
     num_dimensions = _int_setting(
         config,
         "num_dimensions",
@@ -801,49 +857,59 @@ async def main() -> None:
         default=5,
         minimum=1,
     )
-    rubric_path = _path_setting(
-        config,
-        "rubric_path",
-        "ADARUBRIC_RUBRIC_PATH",
-        default=DEFAULT_RUBRIC_PATH,
-    )
-    evidence_path = _path_setting(
-        config,
-        "evidence_path",
-        "ADARUBRIC_EVIDENCE_PATH",
-        default=DEFAULT_EVIDENCE_PATH,
-    )
-
-    messages = build_messages(
-        task,
-        trajectories,
-        config=config,
-        num_dimensions=num_dimensions,
-    )
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.write_text(
-        _evidence_from_messages(messages, workbook_path, config),
-        encoding="utf-8",
-    )
-
-    rubric = await generate_rubric(
-        task=task,
-        trajectories=trajectories,
-        messages=messages,
-        config=config,
-        num_dimensions=num_dimensions,
-    )
-
-    rubric_path.parent.mkdir(parents=True, exist_ok=True)
-    rubric_path.write_text(_rubric_text(rubric) + "\n", encoding="utf-8")
-
     print(f"Loaded config from {args.config}")
-    print(f"Loaded task {task.task_id} with {len(trajectories)} trajectories")
-    print(f"Saved generation evidence to {evidence_path}")
-    print(f"Saved rubric to {rubric_path}")
-    print("Dimensions:")
-    for dimension in rubric.dimensions:
-        print(f"- [{dimension.weight:.2f}] {dimension.name}: {dimension.description}")
+    print(
+        f"Loaded workbook with {len(tasks_by_id)} task(s) and "
+        f"{len(all_trajectories)} trajectory/trajectories"
+    )
+    print(f"Generating rubric(s) for {len(tasks)} selected task(s)")
+
+    for task in tasks:
+        trajectories = _trajectories_for_task(task, all_trajectories)
+        task_config = _config_for_task_outputs(config, task, multiple_tasks=multiple_tasks)
+        rubric_path = _path_setting(
+            task_config,
+            "rubric_path",
+            "ADARUBRIC_RUBRIC_PATH",
+            default=DEFAULT_RUBRIC_PATH,
+        )
+        evidence_path = _path_setting(
+            task_config,
+            "evidence_path",
+            "ADARUBRIC_EVIDENCE_PATH",
+            default=DEFAULT_EVIDENCE_PATH,
+        )
+
+        messages = build_messages(
+            task,
+            trajectories,
+            config=task_config,
+            num_dimensions=num_dimensions,
+        )
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            _evidence_from_messages(messages, workbook_path, task_config, trajectories),
+            encoding="utf-8",
+        )
+
+        rubric = await generate_rubric(
+            task=task,
+            trajectories=trajectories,
+            messages=messages,
+            config=task_config,
+            num_dimensions=num_dimensions,
+        )
+
+        rubric_path.parent.mkdir(parents=True, exist_ok=True)
+        rubric_path.write_text(_rubric_text(rubric) + "\n", encoding="utf-8")
+
+        print("")
+        print(f"Task {task.task_id}: {len(trajectories)} trajectory/trajectories")
+        print(f"Saved generation evidence to {evidence_path}")
+        print(f"Saved rubric to {rubric_path}")
+        print("Dimensions:")
+        for dimension in rubric.dimensions:
+            print(f"- [{dimension.weight:.2f}] {dimension.name}: {dimension.description}")
 
 
 if __name__ == "__main__":
