@@ -36,7 +36,6 @@ from adarubric import (
     Trajectory,
     TrajectoryEvaluation,
 )
-from adarubric.core.exceptions import EvaluationError
 from adarubric.evaluator.aggregator import (
     ConfidenceNormalizedAggregator,
     GeometricMeanAggregator,
@@ -493,110 +492,6 @@ def append_evaluation_jsonl(
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _trajectory_chunks(
-    trajectory: Trajectory,
-    chunk_size: int,
-) -> list[Trajectory]:
-    if chunk_size <= 0 or len(trajectory.steps) <= chunk_size:
-        return [trajectory]
-
-    chunks: list[Trajectory] = []
-    for chunk_index, start in enumerate(range(0, len(trajectory.steps), chunk_size), 1):
-        steps = trajectory.steps[start : start + chunk_size]
-        metadata = dict(trajectory.metadata)
-        metadata.update(
-            {
-                "chunk_index": chunk_index,
-                "chunk_start_step_id": steps[0].step_id,
-                "chunk_end_step_id": steps[-1].step_id,
-                "original_num_steps": len(trajectory.steps),
-            }
-        )
-        chunks.append(
-            Trajectory(
-                trajectory_id=trajectory.trajectory_id,
-                task_id=trajectory.task_id,
-                steps=steps,
-                final_answer=(
-                    trajectory.final_answer
-                    if start + chunk_size >= len(trajectory.steps)
-                    else None
-                ),
-                metadata=metadata,
-            )
-        )
-    return chunks
-
-
-async def evaluate_trajectory_chunked(
-    *,
-    pipeline: AdaRubricPipeline,
-    task: TaskDescription,
-    trajectory: Trajectory,
-    rubric: DynamicRubric,
-    config: Config,
-    temperature: float,
-    eval_max_tokens: int,
-) -> TrajectoryEvaluation:
-    chunk_size = _int_setting(
-        config,
-        "evaluation_step_chunk_size",
-        "ADARUBRIC_EVAL_STEP_CHUNK_SIZE",
-        default=5,
-        minimum=0,
-    )
-    chunks = _trajectory_chunks(trajectory, chunk_size)
-    if len(chunks) > 1:
-        print(
-            f"Trajectory {trajectory.trajectory_id}: evaluating "
-            f"{len(trajectory.steps)} steps in {len(chunks)} chunk(s), "
-            f"chunk_size={chunk_size}"
-        )
-
-    step_evaluations = []
-    for chunk_number, chunk in enumerate(chunks, 1):
-        try:
-            chunk_eval = await pipeline.evaluate(
-                chunk,
-                rubric,
-                temperature=temperature,
-                task_instruction=task.instruction,
-                max_tokens=eval_max_tokens,
-            )
-        except Exception as exc:
-            step_range = f"{chunk.steps[0].step_id}-{chunk.steps[-1].step_id}"
-            raise EvaluationError(
-                f"Failed to evaluate trajectory {trajectory.trajectory_id} "
-                f"chunk {chunk_number}/{len(chunks)} "
-                f"(step_ids={step_range}): {exc}",
-                context={
-                    "trajectory_id": trajectory.trajectory_id,
-                    "chunk_number": chunk_number,
-                    "num_chunks": len(chunks),
-                    "step_ids": [step.step_id for step in chunk.steps],
-                },
-            ) from exc
-        step_evaluations.extend(chunk_eval.step_evaluations)
-
-    step_evaluations.sort(key=lambda step_eval: step_eval.step_id)
-    dimension_globals, global_score = _build_aggregator(config).aggregate_steps(
-        step_evaluations,
-        rubric,
-    )
-    return TrajectoryEvaluation(
-        trajectory_id=trajectory.trajectory_id,
-        task_id=trajectory.task_id,
-        rubric_used=rubric,
-        step_evaluations=step_evaluations,
-        dimension_global_scores=dimension_globals,
-        global_score=global_score,
-        metadata={
-            "evaluation_step_chunk_size": chunk_size,
-            "evaluation_num_chunks": len(chunks),
-        },
-    )
-
-
 async def evaluate_run_incrementally(
     *,
     pipeline: AdaRubricPipeline,
@@ -609,7 +504,6 @@ async def evaluate_run_incrementally(
     eval_max_tokens: int,
     max_concurrent: int,
     evaluations_path: Path,
-    config: Config,
 ) -> PipelineResult:
     sem = asyncio.Semaphore(max(1, max_concurrent))
 
@@ -618,14 +512,12 @@ async def evaluate_run_incrementally(
         trajectory: Trajectory,
     ) -> tuple[int, TrajectoryEvaluation]:
         async with sem:
-            evaluation = await evaluate_trajectory_chunked(
-                pipeline=pipeline,
-                task=task,
-                trajectory=trajectory,
+            evaluation = await pipeline.evaluate(
+                trajectory,
+                rubric,
                 temperature=temperature,
-                rubric=rubric,
-                config=config,
-                eval_max_tokens=eval_max_tokens,
+                task_instruction=task.instruction,
+                max_tokens=eval_max_tokens,
             )
             return index, evaluation
 
@@ -715,7 +607,6 @@ async def evaluate_task(
             eval_max_tokens=eval_max_tokens,
             max_concurrent=max_concurrent,
             evaluations_path=evaluations_path,
-            config=config,
         )
         results.append(result)
     return TaskEvaluationBundle(task=task, rubric_path=rubric_path, results=results)
