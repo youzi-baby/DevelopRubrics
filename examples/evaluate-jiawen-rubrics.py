@@ -28,7 +28,14 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
-from adarubric import AdaRubricPipeline, DynamicRubric, PipelineResult, TaskDescription, Trajectory
+from adarubric import (
+    AdaRubricPipeline,
+    DynamicRubric,
+    PipelineResult,
+    TaskDescription,
+    Trajectory,
+    TrajectoryEvaluation,
+)
 from adarubric.evaluator.aggregator import (
     ConfidenceNormalizedAggregator,
     GeometricMeanAggregator,
@@ -462,12 +469,103 @@ def save_evaluations_jsonl(bundles: list[TaskEvaluationBundle], path: Path) -> N
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def initialize_evaluations_jsonl(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+def append_evaluation_jsonl(
+    *,
+    path: Path,
+    task: TaskDescription,
+    rubric_path: Path,
+    run_number: int,
+    evaluation: TrajectoryEvaluation,
+) -> None:
+    record = {
+        "task_id": task.task_id,
+        "rubric_path": str(rubric_path),
+        "run_number": run_number,
+        "evaluation": json.loads(evaluation.model_dump_json()),
+    }
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+async def evaluate_run_incrementally(
+    *,
+    pipeline: AdaRubricPipeline,
+    task: TaskDescription,
+    trajectories: list[Trajectory],
+    rubric: DynamicRubric,
+    rubric_path: Path,
+    run_number: int,
+    temperature: float,
+    eval_max_tokens: int,
+    max_concurrent: int,
+    evaluations_path: Path,
+) -> PipelineResult:
+    sem = asyncio.Semaphore(max(1, max_concurrent))
+
+    async def _evaluate_one(
+        index: int,
+        trajectory: Trajectory,
+    ) -> tuple[int, TrajectoryEvaluation]:
+        async with sem:
+            evaluation = await pipeline.evaluate(
+                trajectory,
+                rubric,
+                temperature=temperature,
+                task_instruction=task.instruction,
+                max_tokens=eval_max_tokens,
+            )
+            return index, evaluation
+
+    tasks = [
+        asyncio.create_task(_evaluate_one(index, trajectory))
+        for index, trajectory in enumerate(trajectories)
+    ]
+    ordered_evaluations: list[TrajectoryEvaluation | None] = [None] * len(trajectories)
+
+    try:
+        for completed in asyncio.as_completed(tasks):
+            index, evaluation = await completed
+            ordered_evaluations[index] = evaluation
+            append_evaluation_jsonl(
+                path=evaluations_path,
+                task=task,
+                rubric_path=rubric_path,
+                run_number=run_number,
+                evaluation=evaluation,
+            )
+            print(
+                f"Saved JSONL result: task={task.task_id}, "
+                f"run={run_number}, trajectory={evaluation.trajectory_id}, "
+                f"global_score={evaluation.global_score:.3f}"
+            )
+    except Exception:
+        for task_handle in tasks:
+            task_handle.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    all_evaluations = [evaluation for evaluation in ordered_evaluations if evaluation is not None]
+    survivors = pipeline.filter_evaluations(all_evaluations)
+    return PipelineResult(
+        task=task,
+        rubric=rubric,
+        all_evaluations=all_evaluations,
+        surviving_evaluations=survivors,
+    )
+
+
 async def evaluate_task(
     *,
     task: TaskDescription,
     trajectories: list[Trajectory],
     rubric_path: Path,
     config: Config,
+    evaluations_path: Path,
 ) -> TaskEvaluationBundle:
     selected_trajectories = _select_eval_trajectories(trajectories, config)
     rubric = _load_rubric(rubric_path, task)
@@ -498,13 +596,17 @@ async def evaluate_task(
             f"Task {task.task_id}: evaluation run {run_number}/{runs} "
             f"({len(selected_trajectories)} trajectories)"
         )
-        result = await pipeline.run(
-            task,
-            selected_trajectories,
+        result = await evaluate_run_incrementally(
+            pipeline=pipeline,
+            task=task,
+            trajectories=selected_trajectories,
             rubric=rubric,
+            rubric_path=rubric_path,
+            run_number=run_number,
             temperature=temperature,
             eval_max_tokens=eval_max_tokens,
             max_concurrent=max_concurrent,
+            evaluations_path=evaluations_path,
         )
         results.append(result)
     return TaskEvaluationBundle(task=task, rubric_path=rubric_path, results=results)
@@ -524,6 +626,15 @@ async def main() -> None:
     )
     print(f"Evaluating {len(tasks)} selected task(s)")
 
+    evaluations_path = _path_setting(
+        config,
+        "evaluation_jsonl_path",
+        "ADARUBRIC_EVALUATION_JSONL_PATH",
+        default=DEFAULT_EVALUATIONS_PATH,
+    )
+    initialize_evaluations_jsonl(evaluations_path)
+    print(f"Streaming evaluation JSONL to {evaluations_path}")
+
     bundles: list[TaskEvaluationBundle] = []
     for task in tasks:
         trajectories = GEN._trajectories_for_task(task, all_trajectories)
@@ -539,6 +650,7 @@ async def main() -> None:
             trajectories=trajectories,
             rubric_path=rubric_path,
             config=task_config,
+            evaluations_path=evaluations_path,
         )
         bundles.append(bundle)
 
@@ -548,15 +660,8 @@ async def main() -> None:
         "ADARUBRIC_EVALUATION_REPORT_PATH",
         default=DEFAULT_REPORT_PATH,
     )
-    evaluations_path = _path_setting(
-        config,
-        "evaluation_jsonl_path",
-        "ADARUBRIC_EVALUATION_JSONL_PATH",
-        default=DEFAULT_EVALUATIONS_PATH,
-    )
     report = build_report(bundles, config)
     save_report(report, report_path)
-    save_evaluations_jsonl(bundles, evaluations_path)
 
     print("")
     print(report)
