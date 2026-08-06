@@ -62,6 +62,7 @@ DEFAULT_EVALUATIONS_PATH = (
 GENERATOR_SCRIPT = PROJECT_ROOT / "examples" / "generate-jiawen-rubrics.py"
 
 Config = dict[str, Any]
+EvaluationKey = tuple[str, int, str]
 
 
 @dataclass(frozen=True)
@@ -470,9 +471,49 @@ def save_evaluations_jsonl(bundles: list[TaskEvaluationBundle], path: Path) -> N
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def initialize_evaluations_jsonl(path: Path) -> None:
+def initialize_evaluations_jsonl(path: Path, *, resume: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if resume and path.exists():
+        return
     path.write_text("", encoding="utf-8")
+
+
+def _evaluation_key(
+    *,
+    task_id: str,
+    run_number: int,
+    trajectory_id: str,
+) -> EvaluationKey:
+    return (task_id, run_number, trajectory_id)
+
+
+def load_existing_evaluations_jsonl(path: Path) -> dict[EvaluationKey, TrajectoryEvaluation]:
+    if not path.exists():
+        return {}
+
+    existing: dict[EvaluationKey, TrajectoryEvaluation] = {}
+    with path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                evaluation_data = record["evaluation"]
+                evaluation = TrajectoryEvaluation.model_validate(evaluation_data)
+                task_id = str(record.get("task_id") or evaluation.task_id)
+                run_number = int(record["run_number"])
+            except (KeyError, TypeError, ValueError) as exc:
+                print(f"Skipping invalid JSONL checkpoint line {line_number}: {exc}")
+                continue
+
+            key = _evaluation_key(
+                task_id=task_id,
+                run_number=run_number,
+                trajectory_id=evaluation.trajectory_id,
+            )
+            existing[key] = evaluation
+    return existing
 
 
 def append_evaluation_jsonl(
@@ -620,8 +661,29 @@ async def evaluate_run_incrementally(
     max_concurrent: int,
     evaluations_path: Path,
     config: Config,
+    existing_evaluations: dict[EvaluationKey, TrajectoryEvaluation],
 ) -> PipelineResult:
     sem = asyncio.Semaphore(max(1, max_concurrent))
+    ordered_evaluations: list[TrajectoryEvaluation | None] = [None] * len(trajectories)
+    pending: list[tuple[int, Trajectory]] = []
+
+    for index, trajectory in enumerate(trajectories):
+        key = _evaluation_key(
+            task_id=task.task_id,
+            run_number=run_number,
+            trajectory_id=trajectory.trajectory_id,
+        )
+        existing = existing_evaluations.get(key)
+        if existing is None:
+            pending.append((index, trajectory))
+            continue
+
+        ordered_evaluations[index] = existing
+        print(
+            f"Skipping existing JSONL result: task={task.task_id}, "
+            f"run={run_number}, trajectory={trajectory.trajectory_id}, "
+            f"global_score={existing.global_score:.3f}"
+        )
 
     async def _evaluate_one(
         index: int,
@@ -639,11 +701,13 @@ async def evaluate_run_incrementally(
             )
             return index, evaluation
 
+    if not pending:
+        print(f"Task {task.task_id}: run {run_number} already complete in JSONL")
+
     tasks = [
         asyncio.create_task(_evaluate_one(index, trajectory))
-        for index, trajectory in enumerate(trajectories)
+        for index, trajectory in pending
     ]
-    ordered_evaluations: list[TrajectoryEvaluation | None] = [None] * len(trajectories)
 
     try:
         for completed in asyncio.as_completed(tasks):
@@ -661,6 +725,12 @@ async def evaluate_run_incrementally(
                 f"run={run_number}, trajectory={evaluation.trajectory_id}, "
                 f"global_score={evaluation.global_score:.3f}"
             )
+            key = _evaluation_key(
+                task_id=task.task_id,
+                run_number=run_number,
+                trajectory_id=evaluation.trajectory_id,
+            )
+            existing_evaluations[key] = evaluation
     except Exception:
         for task_handle in tasks:
             task_handle.cancel()
@@ -684,6 +754,7 @@ async def evaluate_task(
     rubric_path: Path,
     config: Config,
     evaluations_path: Path,
+    existing_evaluations: dict[EvaluationKey, TrajectoryEvaluation],
 ) -> TaskEvaluationBundle:
     selected_trajectories = _select_eval_trajectories(trajectories, config)
     rubric = _load_rubric(rubric_path, task)
@@ -726,6 +797,7 @@ async def evaluate_task(
             max_concurrent=max_concurrent,
             evaluations_path=evaluations_path,
             config=config,
+            existing_evaluations=existing_evaluations,
         )
         results.append(result)
     return TaskEvaluationBundle(task=task, rubric_path=rubric_path, results=results)
@@ -751,8 +823,19 @@ async def main() -> None:
         "ADARUBRIC_EVALUATION_JSONL_PATH",
         default=DEFAULT_EVALUATIONS_PATH,
     )
-    initialize_evaluations_jsonl(evaluations_path)
+    resume_from_jsonl = _bool_setting(
+        config,
+        "evaluation_resume_from_jsonl",
+        "ADARUBRIC_EVALUATION_RESUME_FROM_JSONL",
+        default=True,
+    )
+    initialize_evaluations_jsonl(evaluations_path, resume=resume_from_jsonl)
+    existing_evaluations = (
+        load_existing_evaluations_jsonl(evaluations_path) if resume_from_jsonl else {}
+    )
     print(f"Streaming evaluation JSONL to {evaluations_path}")
+    if resume_from_jsonl:
+        print(f"Loaded {len(existing_evaluations)} existing JSONL checkpoint(s)")
 
     bundles: list[TaskEvaluationBundle] = []
     for task in tasks:
@@ -770,6 +853,7 @@ async def main() -> None:
             rubric_path=rubric_path,
             config=task_config,
             evaluations_path=evaluations_path,
+            existing_evaluations=existing_evaluations,
         )
         bundles.append(bundle)
 
