@@ -23,6 +23,7 @@
   "evaluation_temperature": 0.0,
   "evaluation_max_tokens": 8192,
   "evaluation_max_concurrent": 2,
+  "evaluation_step_chunk_size": 3,
   "evaluation_trajectory_ids": [],
   "evaluation_trajectory_ids_by_task": {},
   "evaluation_report_path": "docs/evaluation_outputs/jiawen_gui_eval.md",
