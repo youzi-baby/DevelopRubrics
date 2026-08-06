@@ -18,5 +18,21 @@
   "validation_attempts": 10,
   "embedding_model": "text-embedding-3-small",
   "embedding_base_url": null,
-  "embedding_api_key": ""
+  "embedding_api_key": "",
+  "evaluation_runs": 1,
+  "evaluation_temperature": 0.0,
+  "evaluation_max_tokens": 8192,
+  "evaluation_max_concurrent": 2,
+  "evaluation_trajectory_ids": [],
+  "evaluation_trajectory_ids_by_task": {},
+  "evaluation_report_path": "docs/evaluation_outputs/jiawen_gui_eval.md",
+  "evaluation_jsonl_path": "docs/evaluation_outputs/jiawen_gui_eval.jsonl",
+  "aggregation_strategy": "confidence_normalized",
+  "recency_decay": 1.0,
+  "min_evidence": 1e-8,
+  "filter_strategy": "composite",
+  "min_score": 2.5,
+  "default_dimension_threshold": 2.0,
+  "dimension_thresholds": {},
+  "percentile": 75.0
 }
