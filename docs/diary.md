@@ -1,9 +1,11 @@
-# 今日工作总结
+# 工作总结
 
-今天主要围绕 AdaRubric 的 rubric validation 和本地模型实验配置继续推进。首先梳理了本地 embedding 模型的接入方式，明确了即使本地服务不需要真实 API key，也最好在环境变量中写入一个非空占位值，例如 `EMPTY`，因为 OpenAI 兼容客户端通常要求 `api_key` 字段存在。随后整理了将 embedding 的 base url、model name 和 api key 永久写入用户环境变量的 PowerShell 命令，方便后续运行 validation 时不需要每次手动设置。
+8 月 6 日主要围绕 Jiawen GUI 数据集接入 AdaRubric 流程展开。我们把原来偏单任务的 `supply_chain_eval.py` 思路扩展到了 Jiawen 自己的数据上，梳理了如何从 Excel 中加载 task 和 trajectories，并让 rubric generation 支持多任务场景。针对每个任务，脚本可以生成对应的 rubric、evidence 和 raw response，避免多个任务共用同一个输出文件造成覆盖。同时，我们讨论了 evidence 的边界：rubric 生成时不应该强拟合某一条具体轨迹，也不应该把容易变化的具体内容名称写死进 rubric，而应该抽象成任务目标、关键操作、完成条件和反过拟合约束。
 
-在方法理解上，重点检查了当前实现里的 rubric overlap validation。发现现在计算 cosine distance 时只使用了 dimension name，没有把 description 纳入 embedding 输入。因此目前的重叠检查只能判断维度名称是否相似，不能充分判断维度语义是否重叠。进一步明确了如果要增强这个检查，可以在 `adarubric/generator/validation.py` 的 `_validate_dimension_overlap()` 中，把 embedding 文本从单纯的 `dim.name` 改成 `dim.name + dim.description`，这样能更接近对维度含义的检查。
+同一天也搭建了专门的 Jiawen rubric 评估脚本，用生成好的 rubric 去给多任务、多轨迹进行评分。这个过程中明确了生成脚本和评估脚本的分工：`generate-jiawen-rubrics.py` 负责生成和保存 rubric，`evaluate-jiawen-rubrics.py` 负责加载已有 rubric 并评估轨迹。为了方便复查，评估输出被保存为 Markdown 汇总报告和 JSONL 明细文件；为了观察模型评分稳定性，也保留了多轮 evaluation runs 的均值、方差、最小值、最大值和 pass 次数统计。
 
-今天也重新理解了多轮 evaluation 的目的。固定 rubric 后重复跑多轮评估，并不是为了生成更高的分数，而是为了观察同一个 rubric、同一批 trajectory 在 LLM evaluator 下的评分稳定性，包括 global score 的波动、good/weak trajectory 的排序是否稳定，以及 pass/fail 结果是否会因为模型随机性而改变。
+8 月 7 日主要解决实际运行中遇到的稳定性问题。由于本地模型和 API 服务不够稳定，长轨迹一次性评估容易遇到 timeout、upstream error 或 JSON 截断。我们先实现了逐条 JSONL 落盘，让每条 trajectory 评估完成后马上写入结果，避免中途断掉后前面已经完成的评估全部丢失。随后又加入了自适应 chunk 机制：短轨迹保留完整上下文一次性评估，超过阈值的长轨迹自动按 step 分块评估，最后再合并 step-level evaluation 并重新聚合成整条轨迹的 global score。
 
-最后，对论文中的 rubric validation 方法形成了一个比较明确的判断：原论文的三项检查更像是最低限度的结构合法性检查，而不是真正的 rubric 质量筛选。dimension name 很容易在 embedding 空间中显得正交，权重和为 1、评分等级齐全也都属于比较容易满足的格式要求。因此如果后续要筛选“更好的 rubric”，还需要加入更强的质量评估，例如 task relevance、criteria specificity、observable from trajectory、维度语义冗余检查，以及用 good/weak/partial/irrelevant trajectory 做 discriminative power 测试。
+今天还进一步加入了断点续跑能力。评估脚本启动时会读取已有的 `jiawen_gui_eval.jsonl`，根据 `task_id + run_number + trajectory_id` 判断哪些轨迹已经评估过；已有结果会直接复用并进入最终报告统计，缺失的轨迹才会继续调用模型评估。这样即使模型服务在中途崩掉，下次运行也能从断点附近继续，而不是从头重跑所有轨迹。
+
+最后，我们基于验证集结果分析了当前 rubric evaluator 的效果。实验显示，模型在同一个任务内部的相对排序上有比较明显的信号，人工 pass 轨迹大多数时候能排在人工 fail 轨迹前面；但在绝对 pass/fail 判定上还没有校准好，尤其是一些失败轨迹会因为过程看起来合理而被打到较高分数。这个结果说明当前 rubric 更适合做完成质量排序，而如果要稳定地区分 pass/fail，还需要额外加强最终任务完成度判断，或者基于验证集重新校准阈值。
