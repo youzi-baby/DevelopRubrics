@@ -107,7 +107,6 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
         steps_data = [
             {
                 "step_id": s.step_id,
-                "thought": s.thought,
                 "action": s.action,
                 "action_input": s.action_input
                 if isinstance(s.action_input, str)

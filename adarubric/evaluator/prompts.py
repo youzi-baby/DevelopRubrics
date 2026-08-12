@@ -69,8 +69,6 @@ def format_trajectory_steps(steps: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for step in steps:
         lines = [f"--- Step {step['step_id']} ---"]
-        if step.get("thought"):
-            lines.append(f"**Thought**: {step['thought']}")
         lines.append(f"**Action**: {step['action']}")
         if step.get("action_input"):
             lines.append(f"**Action Input**: {step['action_input']}")

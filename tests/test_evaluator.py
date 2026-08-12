@@ -176,3 +176,18 @@ async def test_llm_evaluator_max_tokens(
     assert mock_llm_client.last_max_tokens == 3333
     await ev.evaluate(sample_trajectory, sample_rubric, max_tokens=4444)
     assert mock_llm_client.last_max_tokens == 4444
+
+
+@pytest.mark.asyncio
+async def test_llm_evaluator_does_not_send_thoughts(
+    mock_llm_client: MockLLMClient,
+    sample_trajectory,
+    sample_rubric,
+):
+    ev = LLMTrajectoryEvaluator(mock_llm_client)
+    await ev.evaluate(sample_trajectory, sample_rubric)
+
+    prompt_text = "\n".join(message["content"] for message in mock_llm_client.last_messages)
+    assert "**Thought**" not in prompt_text
+    for step in sample_trajectory.steps:
+        assert step.thought not in prompt_text
