@@ -62,7 +62,7 @@ DEFAULT_EVALUATIONS_PATH = (
 GENERATOR_SCRIPT = PROJECT_ROOT / "examples" / "generate-jiawen-rubrics.py"
 
 Config = dict[str, Any]
-EvaluationKey = tuple[str, int, str]
+EvaluationKey = tuple[str, int, str, str]
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,12 @@ class TaskEvaluationBundle:
     task: TaskDescription
     rubric_path: Path
     results: list[PipelineResult]
+
+
+@dataclass(frozen=True)
+class TrajectoryChunk:
+    trajectory: Trajectory
+    core_step_ids: set[int]
 
 
 def parse_args() -> argparse.Namespace:
@@ -478,13 +484,87 @@ def initialize_evaluations_jsonl(path: Path, *, resume: bool) -> None:
     path.write_text("", encoding="utf-8")
 
 
+def _evaluation_settings(config: Config) -> dict[str, Any]:
+    return {
+        "aggregation_strategy": _setting(
+            config,
+            "aggregation_strategy",
+            "ADARUBRIC_EVAL_AGGREGATION_STRATEGY",
+            "confidence_normalized",
+        ),
+        "default_dimension_threshold": _float_setting(
+            config,
+            "default_dimension_threshold",
+            "ADARUBRIC_DEFAULT_DIMENSION_THRESHOLD",
+            default=2.0,
+        ),
+        "dimension_thresholds": config.get("dimension_thresholds", {}),
+        "evaluation_chunk_enabled": _bool_setting(
+            config,
+            "evaluation_chunk_enabled",
+            "ADARUBRIC_EVAL_CHUNK_ENABLED",
+            default=False,
+        ),
+        "evaluation_chunk_threshold": _int_setting(
+            config,
+            "evaluation_chunk_threshold",
+            "ADARUBRIC_EVAL_CHUNK_THRESHOLD",
+            default=10,
+        ),
+        "evaluation_max_tokens": _int_setting(
+            config,
+            "evaluation_max_tokens",
+            "ADARUBRIC_EVAL_MAX_TOKENS",
+            default=8192,
+        ),
+        "evaluation_step_chunk_overlap": _int_setting(
+            config,
+            "evaluation_step_chunk_overlap",
+            "ADARUBRIC_EVAL_STEP_CHUNK_OVERLAP",
+            default=0,
+            minimum=0,
+        ),
+        "evaluation_step_chunk_size": _int_setting(
+            config,
+            "evaluation_step_chunk_size",
+            "ADARUBRIC_EVAL_STEP_CHUNK_SIZE",
+            default=10,
+        ),
+        "filter_strategy": _setting(
+            config,
+            "filter_strategy",
+            "ADARUBRIC_FILTER_STRATEGY",
+            "composite",
+        ),
+        "min_evidence": _float_setting(
+            config,
+            "min_evidence",
+            "ADARUBRIC_MIN_EVIDENCE",
+            default=1e-8,
+        ),
+        "min_score": _float_setting(config, "min_score", "ADARUBRIC_MIN_SCORE", default=2.5),
+        "percentile": _float_setting(config, "percentile", "ADARUBRIC_PERCENTILE", default=75.0),
+        "recency_decay": _float_setting(
+            config,
+            "recency_decay",
+            "ADARUBRIC_RECENCY_DECAY",
+            default=1.0,
+        ),
+    }
+
+
+def _settings_signature(settings: dict[str, Any]) -> str:
+    return json.dumps(settings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
 def _evaluation_key(
     *,
     task_id: str,
     run_number: int,
     trajectory_id: str,
+    settings_signature: str,
 ) -> EvaluationKey:
-    return (task_id, run_number, trajectory_id)
+    return (task_id, run_number, trajectory_id, settings_signature)
 
 
 def load_existing_evaluations_jsonl(path: Path) -> dict[EvaluationKey, TrajectoryEvaluation]:
@@ -503,6 +583,10 @@ def load_existing_evaluations_jsonl(path: Path) -> dict[EvaluationKey, Trajector
                 evaluation = TrajectoryEvaluation.model_validate(evaluation_data)
                 task_id = str(record.get("task_id") or evaluation.task_id)
                 run_number = int(record["run_number"])
+                settings_signature = str(
+                    record.get("evaluation_settings_signature")
+                    or _settings_signature(record.get("evaluation_settings", {}))
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 print(f"Skipping invalid JSONL checkpoint line {line_number}: {exc}")
                 continue
@@ -511,6 +595,7 @@ def load_existing_evaluations_jsonl(path: Path) -> dict[EvaluationKey, Trajector
                 task_id=task_id,
                 run_number=run_number,
                 trajectory_id=evaluation.trajectory_id,
+                settings_signature=settings_signature,
             )
             existing[key] = evaluation
     return existing
@@ -523,41 +608,58 @@ def append_evaluation_jsonl(
     rubric_path: Path,
     run_number: int,
     evaluation: TrajectoryEvaluation,
+    evaluation_settings: dict[str, Any],
 ) -> None:
     record = {
         "task_id": task.task_id,
         "rubric_path": str(rubric_path),
         "run_number": run_number,
+        "evaluation_settings": evaluation_settings,
+        "evaluation_settings_signature": _settings_signature(evaluation_settings),
         "evaluation": json.loads(evaluation.model_dump_json()),
     }
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _trajectory_chunks(trajectory: Trajectory, chunk_size: int) -> list[Trajectory]:
-    chunks: list[Trajectory] = []
-    for chunk_index, start in enumerate(range(0, len(trajectory.steps), chunk_size), 1):
-        steps = trajectory.steps[start : start + chunk_size]
+def _trajectory_chunks(
+    trajectory: Trajectory,
+    *,
+    chunk_size: int,
+    overlap: int,
+) -> list[TrajectoryChunk]:
+    chunks: list[TrajectoryChunk] = []
+    total_steps = len(trajectory.steps)
+    for chunk_index, core_start in enumerate(range(0, total_steps, chunk_size), 1):
+        core_end = min(core_start + chunk_size, total_steps)
+        context_start = max(0, core_start - overlap)
+        context_end = min(total_steps, core_end + overlap)
+        steps = trajectory.steps[context_start:context_end]
+        core_steps = trajectory.steps[core_start:core_end]
+        core_step_ids = {step.step_id for step in core_steps}
         metadata = dict(trajectory.metadata)
         metadata.update(
             {
                 "chunk_index": chunk_index,
-                "chunk_start_step_id": steps[0].step_id,
-                "chunk_end_step_id": steps[-1].step_id,
-                "original_num_steps": len(trajectory.steps),
+                "chunk_context_start_step_id": steps[0].step_id,
+                "chunk_context_end_step_id": steps[-1].step_id,
+                "chunk_core_start_step_id": core_steps[0].step_id,
+                "chunk_core_end_step_id": core_steps[-1].step_id,
+                "chunk_core_step_ids": sorted(core_step_ids),
+                "chunk_overlap": overlap,
+                "original_num_steps": total_steps,
             }
         )
         chunks.append(
-            Trajectory(
-                trajectory_id=trajectory.trajectory_id,
-                task_id=trajectory.task_id,
-                steps=steps,
-                final_answer=(
-                    trajectory.final_answer
-                    if start + chunk_size >= len(trajectory.steps)
-                    else None
+            TrajectoryChunk(
+                trajectory=Trajectory(
+                    trajectory_id=trajectory.trajectory_id,
+                    task_id=trajectory.task_id,
+                    steps=steps,
+                    final_answer=trajectory.final_answer if core_end >= total_steps else None,
+                    metadata=metadata,
                 ),
-                metadata=metadata,
+                core_step_ids=core_step_ids,
             )
         )
     return chunks
@@ -591,6 +693,13 @@ async def evaluate_trajectory(
         "ADARUBRIC_EVAL_STEP_CHUNK_SIZE",
         default=10,
     )
+    chunk_overlap = _int_setting(
+        config,
+        "evaluation_step_chunk_overlap",
+        "ADARUBRIC_EVAL_STEP_CHUNK_OVERLAP",
+        default=0,
+        minimum=0,
+    )
 
     if not chunk_enabled or len(trajectory.steps) <= chunk_threshold:
         return await pipeline.evaluate(
@@ -601,25 +710,31 @@ async def evaluate_trajectory(
             max_tokens=eval_max_tokens,
         )
 
-    chunks = _trajectory_chunks(trajectory, chunk_size)
+    chunks = _trajectory_chunks(
+        trajectory,
+        chunk_size=chunk_size,
+        overlap=chunk_overlap,
+    )
     print(
         f"Trajectory {trajectory.trajectory_id}: evaluating "
         f"{len(trajectory.steps)} steps in {len(chunks)} chunk(s), "
-        f"threshold={chunk_threshold}, chunk_size={chunk_size}"
+        f"threshold={chunk_threshold}, chunk_size={chunk_size}, "
+        f"overlap={chunk_overlap}"
     )
 
     step_evaluations = []
     for chunk_number, chunk in enumerate(chunks, 1):
         try:
             chunk_eval = await pipeline.evaluate(
-                chunk,
+                chunk.trajectory,
                 rubric,
                 temperature=temperature,
                 task_instruction=task.instruction,
                 max_tokens=eval_max_tokens,
             )
         except Exception as exc:
-            step_range = f"{chunk.steps[0].step_id}-{chunk.steps[-1].step_id}"
+            steps = chunk.trajectory.steps
+            step_range = f"{steps[0].step_id}-{steps[-1].step_id}"
             raise EvaluationError(
                 f"Failed to evaluate trajectory {trajectory.trajectory_id} "
                 f"chunk {chunk_number}/{len(chunks)} "
@@ -628,11 +743,16 @@ async def evaluate_trajectory(
                     "trajectory_id": trajectory.trajectory_id,
                     "chunk_number": chunk_number,
                     "num_chunks": len(chunks),
-                    "step_ids": [step.step_id for step in chunk.steps],
+                    "step_ids": [step.step_id for step in steps],
+                    "core_step_ids": sorted(chunk.core_step_ids),
                 },
             ) from exc
 
-        step_evaluations.extend(chunk_eval.step_evaluations)
+        step_evaluations.extend(
+            step_eval
+            for step_eval in chunk_eval.step_evaluations
+            if step_eval.step_id in chunk.core_step_ids
+        )
 
     step_evaluations.sort(key=lambda step_eval: step_eval.step_id)
     dimension_globals, global_score = _build_aggregator(config).aggregate_steps(
@@ -650,6 +770,7 @@ async def evaluate_trajectory(
             "evaluation_chunk_enabled": chunk_enabled,
             "evaluation_chunk_threshold": chunk_threshold,
             "evaluation_step_chunk_size": chunk_size,
+            "evaluation_step_chunk_overlap": chunk_overlap,
             "evaluation_num_chunks": len(chunks),
         },
     )
@@ -671,6 +792,8 @@ async def evaluate_run_incrementally(
     existing_evaluations: dict[EvaluationKey, TrajectoryEvaluation],
 ) -> PipelineResult:
     sem = asyncio.Semaphore(max(1, max_concurrent))
+    evaluation_settings = _evaluation_settings(config)
+    settings_signature = _settings_signature(evaluation_settings)
     ordered_evaluations: list[TrajectoryEvaluation | None] = [None] * len(trajectories)
     pending: list[tuple[int, Trajectory]] = []
 
@@ -679,6 +802,7 @@ async def evaluate_run_incrementally(
             task_id=task.task_id,
             run_number=run_number,
             trajectory_id=trajectory.trajectory_id,
+            settings_signature=settings_signature,
         )
         existing = existing_evaluations.get(key)
         if existing is None:
@@ -726,6 +850,7 @@ async def evaluate_run_incrementally(
                 rubric_path=rubric_path,
                 run_number=run_number,
                 evaluation=evaluation,
+                evaluation_settings=evaluation_settings,
             )
             print(
                 f"Saved JSONL result: task={task.task_id}, "
@@ -736,6 +861,7 @@ async def evaluate_run_incrementally(
                 task_id=task.task_id,
                 run_number=run_number,
                 trajectory_id=evaluation.trajectory_id,
+                settings_signature=settings_signature,
             )
             existing_evaluations[key] = evaluation
     except Exception:
