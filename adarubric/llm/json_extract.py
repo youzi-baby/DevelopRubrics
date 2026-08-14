@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import re
+
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove model thinking blocks before parsing or saving final answers."""
+    return _THINK_BLOCK_RE.sub("", text).strip()
+
 
 def extract_json_substring(text: str) -> str:
     """Return the first JSON object or array substring from ``text``.
@@ -10,7 +19,7 @@ def extract_json_substring(text: str) -> str:
     ``{...}`` or ``[...]`` using brace depth (strings are not parsed; rare
     false positives if braces appear unescaped in string literals).
     """
-    t = text.strip()
+    t = strip_thinking(text)
     for marker in ("```json", "```JSON", "```"):
         if marker in t:
             start = t.index(marker) + len(marker)
@@ -19,10 +28,13 @@ def extract_json_substring(text: str) -> str:
             t = rest[:fence_end].strip() if fence_end != -1 else rest.strip()
             break
 
-    for open_char, close_char in ("{", "}"), ("[", "]"):
-        first = t.find(open_char)
-        if first == -1:
-            continue
+    starts = [
+        (idx, open_char, close_char)
+        for open_char, close_char in (("{", "}"), ("[", "]"))
+        if (idx := t.find(open_char)) != -1
+    ]
+    if starts:
+        first, open_char, close_char = min(starts, key=lambda item: item[0])
         depth = 0
         for i in range(first, len(t)):
             ch = t[i]

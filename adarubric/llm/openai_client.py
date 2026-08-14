@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
@@ -38,6 +39,29 @@ T = TypeVar("T", bound=BaseModel)
 _RETRYABLE = (APIConnectionError, APITimeoutError, RateLimitError)
 # 5xx status codes are transient server-side errors and should be retried.
 _RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+_EXTRA_BODY_ENV = "ADARUBRIC_EXTRA_BODY_JSON"
+
+
+def parse_extra_body(value: Any, *, source: str = "extra_body") -> dict[str, Any] | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{source} must be a JSON object or JSON object string")
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{source} must be a JSON object")
+    return parsed
+
+
+def _extra_body_from_env(value: str | None = None) -> dict[str, Any] | None:
+    raw = os.environ.get(_EXTRA_BODY_ENV) if value is None else value
+    return parse_extra_body(raw, source=_EXTRA_BODY_ENV)
 
 
 class OpenAIClient(LLMClient):
@@ -53,6 +77,9 @@ class OpenAIClient(LLMClient):
         Override API base URL for compatible providers.
     max_retries : int
         Maximum retry attempts for transient failures.
+    extra_body : dict | None
+        Optional OpenAI-compatible provider-specific request body fields.
+        If omitted, ``ADARUBRIC_EXTRA_BODY_JSON`` is used when set.
     """
 
     def __init__(
@@ -62,9 +89,11 @@ class OpenAIClient(LLMClient):
         api_key: str | None = None,
         base_url: str | None = None,
         max_retries: int = 3,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
         self._max_retries = max(1, max_retries)
+        self._extra_body = extra_body if extra_body is not None else _extra_body_from_env()
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def _chat(
@@ -84,6 +113,8 @@ class OpenAIClient(LLMClient):
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
 
         delay = 2.0
         last_exc: Exception | None = None

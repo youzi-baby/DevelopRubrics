@@ -60,8 +60,8 @@ from adarubric.generator.prompts import (
     RUBRIC_GENERATION_USER,
 )
 from adarubric.generator.validation import OpenAIEmbeddingProvider, RubricValidator
-from adarubric.llm.json_extract import extract_json_substring
-from adarubric.llm.openai_client import OpenAIClient
+from adarubric.llm.json_extract import extract_json_substring, strip_thinking
+from adarubric.llm.openai_client import OpenAIClient, parse_extra_body
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 JIAWEN_DATASET_ROOT = PROJECT_ROOT / "jiawen-dataset"
@@ -235,6 +235,19 @@ def _list_setting(config: Config, key: str, env_name: str) -> list[str]:
     if isinstance(configured, list):
         return [str(item).strip() for item in configured if str(item).strip()]
     raise ValueError(f"{key} / {env_name} must be a list or comma-separated string")
+
+
+def _extra_body_setting(config: Config) -> dict[str, Any] | None:
+    if "extra_body" in config:
+        if config["extra_body"] in (None, ""):
+            return {}
+        return parse_extra_body(config["extra_body"], source="extra_body")
+    if "ADARUBRIC_EXTRA_BODY_JSON" in os.environ:
+        return parse_extra_body(
+            os.environ["ADARUBRIC_EXTRA_BODY_JSON"],
+            source="ADARUBRIC_EXTRA_BODY_JSON",
+        )
+    return None
 
 
 def _safe_filename_part(value: str) -> str:
@@ -634,7 +647,7 @@ def _evidence_from_messages(
 
 def _write_raw_response(path: Path, *, stage: str, raw: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"## {stage}\n\n{raw.rstrip()}\n", encoding="utf-8")
+    path.write_text(f"## {stage}\n\n{strip_thinking(raw).rstrip()}\n", encoding="utf-8")
 
 
 def _rubric_text(rubric: DynamicRubric) -> str:
@@ -770,6 +783,7 @@ async def generate_rubric(
             or os.environ.get("OPENAI_API_KEY")
             or "EMPTY"
         ),
+        extra_body=_extra_body_setting(config),
     )
     validator = build_validator(config)
     attempts = _int_setting(

@@ -309,6 +309,7 @@ def _build_client(config: Config) -> OpenAIClient:
             or os.environ.get("OPENAI_API_KEY")
             or "EMPTY"
         ),
+        extra_body=GEN._extra_body_setting(config),
     )
 
 

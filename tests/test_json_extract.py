@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from adarubric.llm.json_extract import extract_json_substring
+from adarubric.llm.json_extract import extract_json_substring, strip_thinking
 
 
 def test_fenced_json_block():
@@ -17,3 +17,14 @@ def test_plain_object():
 def test_nested_braces():
     raw = '{"outer": {"inner": 2}}'
     assert extract_json_substring(raw) == raw
+
+
+def test_strip_thinking_block():
+    raw = '<think>{"scratch": true}</think>\n{"final": true}'
+    assert strip_thinking(raw) == '{"final": true}'
+    assert extract_json_substring(raw) == '{"final": true}'
+
+
+def test_strip_thinking_block_case_insensitive():
+    raw = '<THINK>private reasoning</THINK>\n[{"rank": 1}]'
+    assert extract_json_substring(raw) == '[{"rank": 1}]'

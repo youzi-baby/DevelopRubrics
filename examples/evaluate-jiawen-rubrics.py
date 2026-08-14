@@ -298,6 +298,7 @@ def _build_pipeline(config: Config) -> AdaRubricPipeline:
             or os.environ.get("OPENAI_API_KEY")
             or "EMPTY"
         ),
+        extra_body=GEN._extra_body_setting(config),
     )
     max_concurrent = _int_setting(
         config,

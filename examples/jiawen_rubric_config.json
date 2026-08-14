@@ -1,5 +1,10 @@
 {
   "workbook_path": "jiawen-dataset/outputs/gui_trajectories/mobile_gui_trajectories_qwen.xlsx",
+  "extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": true
+    }
+  },
   "task_id": null,
   "task_ids": [],
   "process_all_tasks": true,
