@@ -68,3 +68,29 @@ def test_completion_first_prompt_can_be_enabled():
     assert "Completion of the requested task is the most important criterion" in messages[0][
         "content"
     ]
+
+
+def test_parse_direct_judge_response_accepts_ranking_array():
+    module = _load_module()
+
+    response = module._parse_direct_judge_response(
+        '[{"trajectory_id": "traj-1", "reason": "better"}]',
+        task=_task(),
+    )
+
+    assert response.task_id == "task-1"
+    assert response.ranking[0].rank == 1
+    assert response.ranking[0].trajectory_id == "traj-1"
+
+
+def test_parse_direct_judge_response_accepts_common_aliases():
+    module = _load_module()
+
+    response = module._parse_direct_judge_response(
+        '{"rankings": [{"trajectoryId": "traj-1", "rationale": "observable progress"}]}',
+        task=_task(),
+    )
+
+    assert response.ranking[0].rank == 1
+    assert response.ranking[0].trajectory_id == "traj-1"
+    assert response.ranking[0].reason == "observable progress"

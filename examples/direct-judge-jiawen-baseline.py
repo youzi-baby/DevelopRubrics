@@ -21,9 +21,10 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from adarubric import TaskDescription, Trajectory
+from adarubric.llm.json_extract import extract_json_substring, strip_thinking
 from adarubric.llm.openai_client import OpenAIClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,9 @@ DEFAULT_REPORT_PATH = (
 )
 DEFAULT_CSV_PATH = (
     PROJECT_ROOT / "docs" / "evaluation_outputs" / "jiawen_direct_judge_baseline.csv"
+)
+DEFAULT_RAW_RESPONSE_PATH = (
+    PROJECT_ROOT / "docs" / "evaluation_outputs" / "jiawen_direct_judge_baseline.raw_response.jsonl"
 )
 GENERATOR_SCRIPT = PROJECT_ROOT / "examples" / "generate-jiawen-rubrics.py"
 
@@ -73,6 +77,35 @@ Instruction: {instruction}
 Rank all candidate trajectories from best to worst. Provide concise observable
 reasons for each ranking decision.\
 """
+
+DIRECT_JUDGE_JSON_CONTRACT = """\
+
+Return only one valid JSON object. Do not use markdown fences or prose outside
+the JSON. The JSON object must have this exact shape:
+
+{{
+  "task_id": "{task_id}",
+  "ranking": [
+    {{
+      "rank": 1,
+      "trajectory_id": "one of: {candidate_ids}",
+      "reason": "concise observable reason"
+    }}
+  ],
+  "overall_reason": "brief overall comparison"
+}}
+
+Rules:
+- ranking must include every candidate trajectory exactly once.
+- rank must be consecutive integers starting at 1.
+- trajectory_id must exactly match one of: {candidate_ids}.
+- Do not include scores, pass/fail labels, hidden thoughts, or final_answer.\
+"""
+
+JSON_REPAIR_SYSTEM = """\
+You repair malformed direct-judge ranking outputs into valid JSON.
+Return only one valid JSON object and preserve the intended ranking.
+Do not add markdown fences, comments, or explanatory prose."""
 
 
 class DirectJudgeRank(BaseModel):
@@ -307,6 +340,11 @@ def build_messages(
         instruction=task.instruction,
         trajectory_text=trajectory_text,
     )
+    candidate_ids = ", ".join(trajectory.trajectory_id for trajectory in trajectories)
+    user_content += "\n\n" + DIRECT_JUDGE_JSON_CONTRACT.format(
+        task_id=task.task_id,
+        candidate_ids=candidate_ids,
+    )
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
@@ -381,6 +419,27 @@ def append_jsonl(path: Path, result: DirectJudgeResult) -> None:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def append_raw_response_jsonl(
+    path: Path,
+    *,
+    task: TaskDescription,
+    run_number: int,
+    candidate_ids: list[str],
+    stage: str,
+    raw: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "task_id": task.task_id,
+        "run_number": run_number,
+        "candidate_ids": candidate_ids,
+        "stage": stage,
+        "raw_response": strip_thinking(raw),
+    }
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _normalize_response(
     response: DirectJudgeResponse,
     task: TaskDescription,
@@ -408,6 +467,107 @@ def _normalize_response(
     )
 
 
+def _coerce_direct_judge_data(
+    data: Any,
+    *,
+    task: TaskDescription,
+) -> dict[str, Any]:
+    if isinstance(data, list):
+        data = {"ranking": data}
+    if not isinstance(data, dict):
+        raise ValueError("direct judge response must be a JSON object or ranking array")
+
+    coerced = dict(data)
+    if "ranking" not in coerced and "rankings" in coerced:
+        coerced["ranking"] = coerced["rankings"]
+
+    ranking = coerced.get("ranking")
+    if not isinstance(ranking, list):
+        return coerced
+
+    normalized_ranking: list[dict[str, Any]] = []
+    for index, item in enumerate(ranking, 1):
+        if isinstance(item, str):
+            normalized_ranking.append(
+                {
+                    "rank": index,
+                    "trajectory_id": item,
+                    "reason": "",
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            normalized_ranking.append(item)
+            continue
+
+        normalized = dict(item)
+        normalized.setdefault("rank", index)
+        if "trajectory_id" not in normalized:
+            for alias in ("id", "trajectory", "trajectoryId"):
+                if alias in normalized:
+                    normalized["trajectory_id"] = normalized[alias]
+                    break
+        if "reason" not in normalized:
+            normalized["reason"] = str(
+                normalized.get("rationale") or normalized.get("explanation") or ""
+            )
+        normalized_ranking.append(normalized)
+
+    coerced["task_id"] = str(coerced.get("task_id") or task.task_id)
+    coerced["ranking"] = normalized_ranking
+    coerced["overall_reason"] = str(
+        coerced.get("overall_reason") or coerced.get("reason") or coerced.get("rationale") or ""
+    )
+    return coerced
+
+
+def _parse_direct_judge_response(raw: str, *, task: TaskDescription) -> DirectJudgeResponse:
+    extracted = extract_json_substring(raw)
+    data = json.loads(extracted)
+    return DirectJudgeResponse.model_validate(_coerce_direct_judge_data(data, task=task))
+
+
+async def _repair_direct_judge_response(
+    *,
+    client: OpenAIClient,
+    raw: str,
+    task: TaskDescription,
+    trajectories: list[Trajectory],
+    max_tokens: int,
+    raw_response_path: Path,
+    run_number: int,
+) -> DirectJudgeResponse:
+    candidate_ids = [trajectory.trajectory_id for trajectory in trajectories]
+    repair_messages = [
+        {"role": "system", "content": JSON_REPAIR_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                DIRECT_JUDGE_JSON_CONTRACT.format(
+                    task_id=task.task_id,
+                    candidate_ids=", ".join(candidate_ids),
+                )
+                + "\n\nMalformed direct-judge output to repair:\n"
+                + raw
+            ),
+        },
+    ]
+    repaired = await client.generate_text(
+        repair_messages,
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+    append_raw_response_jsonl(
+        raw_response_path,
+        task=task,
+        run_number=run_number,
+        candidate_ids=candidate_ids,
+        stage="json_repair_raw_response",
+        raw=repaired,
+    )
+    return _parse_direct_judge_response(repaired, task=task)
+
+
 async def judge_task_once(
     *,
     client: OpenAIClient,
@@ -417,27 +577,57 @@ async def judge_task_once(
     run_number: int,
 ) -> DirectJudgeResult:
     messages = build_messages(task, trajectories, config=config)
-    response = await client.generate_structured(
-        messages,
-        DirectJudgeResponse,
-        temperature=_float_setting(
-            config,
-            "direct_judge_temperature",
-            "ADARUBRIC_DIRECT_JUDGE_TEMPERATURE",
-            default=0.0,
-        ),
-        max_tokens=_int_setting(
-            config,
-            "direct_judge_max_tokens",
-            "ADARUBRIC_DIRECT_JUDGE_MAX_TOKENS",
-            default=2048,
-        ),
+    temperature = _float_setting(
+        config,
+        "direct_judge_temperature",
+        "ADARUBRIC_DIRECT_JUDGE_TEMPERATURE",
+        default=0.0,
     )
+    max_tokens = _int_setting(
+        config,
+        "direct_judge_max_tokens",
+        "ADARUBRIC_DIRECT_JUDGE_MAX_TOKENS",
+        default=2048,
+    )
+    raw_response_path = _path_setting(
+        config,
+        "direct_judge_raw_response_path",
+        "ADARUBRIC_DIRECT_JUDGE_RAW_RESPONSE_PATH",
+        default=DEFAULT_RAW_RESPONSE_PATH,
+    )
+    candidate_ids = [trajectory.trajectory_id for trajectory in trajectories]
+
+    raw = await client.generate_text(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    append_raw_response_jsonl(
+        raw_response_path,
+        task=task,
+        run_number=run_number,
+        candidate_ids=candidate_ids,
+        stage="direct_judge_raw_response",
+        raw=raw,
+    )
+    try:
+        response = _parse_direct_judge_response(raw, task=task)
+    except (ValidationError, json.JSONDecodeError, ValueError):
+        response = await _repair_direct_judge_response(
+            client=client,
+            raw=raw,
+            task=task,
+            trajectories=trajectories,
+            max_tokens=max_tokens,
+            raw_response_path=raw_response_path,
+            run_number=run_number,
+        )
+
     response = _normalize_response(response, task, trajectories)
     return DirectJudgeResult(
         task=task,
         run_number=run_number,
-        candidate_ids=[trajectory.trajectory_id for trajectory in trajectories],
+        candidate_ids=candidate_ids,
         response=response,
     )
 
