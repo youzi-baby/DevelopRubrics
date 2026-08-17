@@ -112,6 +112,18 @@ def test_parse_direct_judge_response_accepts_common_aliases():
     assert response.ranking[0].reason == "observable progress"
 
 
+def test_parse_direct_judge_response_accepts_python_literal():
+    module = _load_module()
+
+    response = module._parse_direct_judge_response(
+        "{'ranking': [{'trajectory_id': 'traj-1', 'reason': 'better'}]}",
+        task=_task(),
+    )
+
+    assert response.ranking[0].rank == 1
+    assert response.ranking[0].trajectory_id == "traj-1"
+
+
 def test_normalize_response_maps_source_session_id_aliases():
     module = _load_module()
     trajectories = [
@@ -137,5 +149,28 @@ def test_normalize_response_maps_source_session_id_aliases():
 
     assert [item.trajectory_id for item in normalized.ranking] == [
         "task-folder__YYSP-TXSP-468faa-9-2",
+        "task-folder__YYSP-TXSP-468faa-9-1",
+    ]
+
+
+def test_response_from_candidate_mentions_recovers_text_ranking():
+    module = _load_module()
+    trajectories = [
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-1"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-2"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-5"),
+    ]
+
+    response = module._response_from_candidate_mentions(
+        "1. YYSP-TXSP-468faa-9-2 is best\n"
+        "2. YYSP-TXSP-468faa-9-5 is second\n"
+        "3. YYSP-TXSP-468faa-9-1 is weakest",
+        task=_task(),
+        trajectories=trajectories,
+    )
+
+    assert [item.trajectory_id for item in response.ranking] == [
+        "task-folder__YYSP-TXSP-468faa-9-2",
+        "task-folder__YYSP-TXSP-468faa-9-5",
         "task-folder__YYSP-TXSP-468faa-9-1",
     ]

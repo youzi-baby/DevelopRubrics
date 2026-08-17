@@ -9,6 +9,7 @@ then asks the LLM to rank the trajectories from best to worst with reasons.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import csv
 import importlib.util
@@ -24,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from adarubric import TaskDescription, Trajectory
+from adarubric.core.exceptions import LLMClientError
 from adarubric.llm.json_extract import extract_json_substring, strip_thinking
 from adarubric.llm.openai_client import OpenAIClient
 
@@ -568,8 +570,61 @@ def _coerce_direct_judge_data(
 
 def _parse_direct_judge_response(raw: str, *, task: TaskDescription) -> DirectJudgeResponse:
     extracted = extract_json_substring(raw)
-    data = json.loads(extracted)
+    try:
+        data = json.loads(extracted)
+    except json.JSONDecodeError:
+        data = ast.literal_eval(extracted)
     return DirectJudgeResponse.model_validate(_coerce_direct_judge_data(data, task=task))
+
+
+def _line_containing(text: str, needle: str) -> str:
+    for line in text.splitlines():
+        if needle in line:
+            return line.strip()
+    return ""
+
+
+def _response_from_candidate_mentions(
+    raw: str,
+    *,
+    task: TaskDescription,
+    trajectories: list[Trajectory],
+) -> DirectJudgeResponse:
+    text = strip_thinking(raw)
+    mentions: list[tuple[int, str, str]] = []
+    for trajectory in trajectories:
+        best: tuple[int, str] | None = None
+        for alias in _trajectory_aliases(trajectory):
+            index = text.find(alias)
+            if index == -1:
+                continue
+            if best is None or index < best[0]:
+                best = (index, alias)
+        if best is not None:
+            mentions.append((best[0], trajectory.trajectory_id, best[1]))
+
+    if len(mentions) != len(trajectories):
+        found_ids = [trajectory_id for _, trajectory_id, _ in mentions]
+        expected_ids = [trajectory.trajectory_id for trajectory in trajectories]
+        raise ValueError(
+            "Could not recover complete ranking from non-JSON response. "
+            f"Found {found_ids}, expected {expected_ids}"
+        )
+
+    mentions.sort(key=lambda item: item[0])
+    return DirectJudgeResponse(
+        task_id=task.task_id,
+        ranking=[
+            DirectJudgeRank(
+                rank=rank,
+                trajectory_id=trajectory_id,
+                reason=_line_containing(text, matched_alias)
+                or "Recovered from non-JSON direct judge output.",
+            )
+            for rank, (_, trajectory_id, matched_alias) in enumerate(mentions, 1)
+        ],
+        overall_reason="Recovered from non-JSON direct judge output.",
+    )
 
 
 async def _repair_direct_judge_response(
@@ -657,16 +712,38 @@ async def judge_task_once(
     )
     try:
         response = _parse_direct_judge_response(raw, task=task)
-    except (ValidationError, json.JSONDecodeError, ValueError):
-        response = await _repair_direct_judge_response(
-            client=client,
-            raw=raw,
-            task=task,
-            trajectories=trajectories,
-            max_tokens=max_tokens,
-            raw_response_path=raw_response_path,
-            run_number=run_number,
-        )
+    except (SyntaxError, ValidationError, json.JSONDecodeError, ValueError) as parse_exc:
+        try:
+            response = await _repair_direct_judge_response(
+                client=client,
+                raw=raw,
+                task=task,
+                trajectories=trajectories,
+                max_tokens=max_tokens,
+                raw_response_path=raw_response_path,
+                run_number=run_number,
+            )
+        except (SyntaxError, ValidationError, json.JSONDecodeError, ValueError) as repair_exc:
+            try:
+                response = _response_from_candidate_mentions(
+                    raw,
+                    task=task,
+                    trajectories=trajectories,
+                )
+            except ValueError as fallback_exc:
+                raise LLMClientError(
+                    "Failed to parse direct judge response after JSON repair and text fallback",
+                    context={
+                        "task_id": task.task_id,
+                        "run_number": run_number,
+                        "candidate_ids": candidate_ids,
+                        "raw_response_path": str(raw_response_path),
+                        "parse_error": str(parse_exc),
+                        "repair_error": str(repair_exc),
+                        "fallback_error": str(fallback_exc),
+                        "raw_response_preview": strip_thinking(raw)[:1000],
+                    },
+                ) from repair_exc
 
     response = _normalize_response(response, task, trajectories)
     return DirectJudgeResult(
