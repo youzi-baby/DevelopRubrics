@@ -90,7 +90,7 @@ the JSON. The JSON object must have this exact shape:
   "ranking": [
     {{
       "rank": 1,
-      "trajectory_id": "one of: {candidate_ids}",
+      "trajectory_id": "one exact trajectory_id or candidate label",
       "reason": "concise observable reason"
     }}
   ],
@@ -100,7 +100,8 @@ the JSON. The JSON object must have this exact shape:
 Rules:
 - ranking must include every candidate trajectory exactly once.
 - rank must be consecutive integers starting at 1.
-- trajectory_id must exactly match one of: {candidate_ids}.
+- Prefer exact trajectory_id values when possible.
+- If an ID is too long to copy safely, use its candidate label instead: {candidate_labels}.
 - Do not include scores, pass/fail labels, hidden thoughts, or final_answer.\
 """
 
@@ -251,21 +252,32 @@ def _clean_trajectory_id(value: Any) -> str:
     return str(value).strip().strip("`").strip()
 
 
-def _trajectory_aliases(trajectory: Trajectory) -> set[str]:
+def _trajectory_aliases(trajectory: Trajectory, *, index: int | None = None) -> set[str]:
     aliases = {trajectory.trajectory_id}
     source_session_id = str(trajectory.metadata.get("source_session_id", "")).strip()
     if source_session_id:
         aliases.add(source_session_id)
     if "__" in trajectory.trajectory_id:
         aliases.add(trajectory.trajectory_id.split("__", 1)[1])
+    if index is not None:
+        aliases.update(
+            {
+                f"C{index}",
+                f"c{index}",
+                f"Candidate {index}",
+                f"candidate {index}",
+                f"Trajectory {index}",
+                f"trajectory {index}",
+            }
+        )
     return {alias for alias in aliases if alias}
 
 
 def _trajectory_alias_map(trajectories: list[Trajectory]) -> dict[str, str]:
     alias_to_id: dict[str, str] = {}
     ambiguous: set[str] = set()
-    for trajectory in trajectories:
-        for alias in _trajectory_aliases(trajectory):
+    for index, trajectory in enumerate(trajectories, 1):
+        for alias in _trajectory_aliases(trajectory, index=index):
             cleaned = _clean_trajectory_id(alias)
             existing = alias_to_id.get(cleaned)
             if existing is not None and existing != trajectory.trajectory_id:
@@ -333,8 +345,11 @@ def _format_action_input(action_input: Any) -> str:
     return json.dumps(action_input, ensure_ascii=False)
 
 
-def format_trajectory_for_direct_judge(trajectory: Trajectory) -> str:
-    lines = [f"## Trajectory `{trajectory.trajectory_id}`"]
+def format_trajectory_for_direct_judge(trajectory: Trajectory, *, index: int) -> str:
+    lines = [
+        f"## Candidate C{index}",
+        f"Trajectory ID: `{trajectory.trajectory_id}`",
+    ]
     source_session_id = str(trajectory.metadata.get("source_session_id", "")).strip()
     if source_session_id and source_session_id != trajectory.trajectory_id:
         lines.append(f"Source Session ID: `{source_session_id}`")
@@ -359,7 +374,8 @@ def build_messages(
     config: Config,
 ) -> list[dict[str, str]]:
     trajectory_text = "\n\n".join(
-        format_trajectory_for_direct_judge(trajectory) for trajectory in trajectories
+        format_trajectory_for_direct_judge(trajectory, index=index)
+        for index, trajectory in enumerate(trajectories, 1)
     )
     system_content = DIRECT_JUDGE_SYSTEM
     if _bool_setting(
@@ -376,9 +392,14 @@ def build_messages(
         trajectory_text=trajectory_text,
     )
     candidate_ids = ", ".join(trajectory.trajectory_id for trajectory in trajectories)
+    candidate_labels = ", ".join(
+        f"C{index}={trajectory.trajectory_id}"
+        for index, trajectory in enumerate(trajectories, 1)
+    )
     user_content += "\n\n" + DIRECT_JUDGE_JSON_CONTRACT.format(
         task_id=task.task_id,
         candidate_ids=candidate_ids,
+        candidate_labels=candidate_labels,
     )
     return [
         {"role": "system", "content": system_content},
@@ -497,9 +518,19 @@ def _normalize_response(
     ranked = [item for item in ranked if item.trajectory_id in expected_set]
     ranked_ids = {item.trajectory_id for item in ranked}
     missing = [trajectory_id for trajectory_id in expected_ids if trajectory_id not in ranked_ids]
-    if missing:
+    if missing and not ranked:
+        received_ids = [item.trajectory_id for item in response.ranking]
         raise ValueError(
-            f"Direct judge response missing trajectory id(s) for task {task.task_id}: {missing}"
+            f"Direct judge response did not match any trajectory id(s) for task "
+            f"{task.task_id}. Received: {received_ids}; expected: {expected_ids}"
+        )
+    for trajectory_id in missing:
+        ranked.append(
+            DirectJudgeRank(
+                rank=len(ranked) + 1,
+                trajectory_id=trajectory_id,
+                reason="Missing from model ranking; appended after ranked candidates.",
+            )
         )
 
     ranked.sort(key=lambda item: item.rank)
@@ -592,9 +623,9 @@ def _response_from_candidate_mentions(
 ) -> DirectJudgeResponse:
     text = strip_thinking(raw)
     mentions: list[tuple[int, str, str]] = []
-    for trajectory in trajectories:
+    for index, trajectory in enumerate(trajectories, 1):
         best: tuple[int, str] | None = None
-        for alias in _trajectory_aliases(trajectory):
+        for alias in _trajectory_aliases(trajectory, index=index):
             index = text.find(alias)
             if index == -1:
                 continue
@@ -638,6 +669,10 @@ async def _repair_direct_judge_response(
     run_number: int,
 ) -> DirectJudgeResponse:
     candidate_ids = [trajectory.trajectory_id for trajectory in trajectories]
+    candidate_labels = ", ".join(
+        f"C{index}={trajectory.trajectory_id}"
+        for index, trajectory in enumerate(trajectories, 1)
+    )
     repair_messages = [
         {"role": "system", "content": JSON_REPAIR_SYSTEM},
         {
@@ -646,6 +681,7 @@ async def _repair_direct_judge_response(
                 DIRECT_JUDGE_JSON_CONTRACT.format(
                     task_id=task.task_id,
                     candidate_ids=", ".join(candidate_ids),
+                    candidate_labels=candidate_labels,
                 )
                 + "\n\nMalformed direct-judge output to repair:\n"
                 + raw

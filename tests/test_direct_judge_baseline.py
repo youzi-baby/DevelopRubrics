@@ -153,6 +153,48 @@ def test_normalize_response_maps_source_session_id_aliases():
     ]
 
 
+def test_normalize_response_maps_candidate_labels():
+    module = _load_module()
+    trajectories = [
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-1"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-2"),
+    ]
+    response = module.DirectJudgeResponse(
+        ranking=[
+            module.DirectJudgeRank(rank=1, trajectory_id="C2", reason="better"),
+            module.DirectJudgeRank(rank=2, trajectory_id="C1", reason="weaker"),
+        ]
+    )
+
+    normalized = module._normalize_response(response, _task(), trajectories)
+
+    assert [item.trajectory_id for item in normalized.ranking] == [
+        "task-folder__YYSP-TXSP-468faa-9-2",
+        "task-folder__YYSP-TXSP-468faa-9-1",
+    ]
+
+
+def test_normalize_response_appends_missing_candidates_after_ranked_items():
+    module = _load_module()
+    trajectories = [
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-1"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-2"),
+    ]
+    response = module.DirectJudgeResponse(
+        ranking=[module.DirectJudgeRank(rank=1, trajectory_id="C2", reason="better")]
+    )
+
+    normalized = module._normalize_response(response, _task(), trajectories)
+
+    assert [item.trajectory_id for item in normalized.ranking] == [
+        "task-folder__YYSP-TXSP-468faa-9-2",
+        "task-folder__YYSP-TXSP-468faa-9-1",
+    ]
+    assert normalized.ranking[1].reason == (
+        "Missing from model ranking; appended after ranked candidates."
+    )
+
+
 def test_response_from_candidate_mentions_recovers_text_ranking():
     module = _load_module()
     trajectories = [
@@ -162,9 +204,7 @@ def test_response_from_candidate_mentions_recovers_text_ranking():
     ]
 
     response = module._response_from_candidate_mentions(
-        "1. YYSP-TXSP-468faa-9-2 is best\n"
-        "2. YYSP-TXSP-468faa-9-5 is second\n"
-        "3. YYSP-TXSP-468faa-9-1 is weakest",
+        "1. C2 is best\n" "2. C3 is second\n" "3. C1 is weakest",
         task=_task(),
         trajectories=trajectories,
     )
