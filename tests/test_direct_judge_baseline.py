@@ -46,6 +46,22 @@ def _trajectory() -> Trajectory:
     )
 
 
+def _prefixed_trajectory(source_session_id: str) -> Trajectory:
+    return Trajectory(
+        trajectory_id=f"task-folder__{source_session_id}",
+        task_id="task-1",
+        steps=[
+            TrajectoryStep(
+                step_id=1,
+                action="tap",
+                action_input={"target": "history"},
+                observation="The playback history page is visible.",
+            )
+        ],
+        metadata={"source_session_id": source_session_id},
+    )
+
+
 def test_completion_first_prompt_is_off_by_default():
     module = _load_module()
 
@@ -94,3 +110,32 @@ def test_parse_direct_judge_response_accepts_common_aliases():
     assert response.ranking[0].rank == 1
     assert response.ranking[0].trajectory_id == "traj-1"
     assert response.ranking[0].reason == "observable progress"
+
+
+def test_normalize_response_maps_source_session_id_aliases():
+    module = _load_module()
+    trajectories = [
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-1"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-2"),
+    ]
+    response = module.DirectJudgeResponse(
+        ranking=[
+            module.DirectJudgeRank(
+                rank=1,
+                trajectory_id="YYSP-TXSP-468faa-9-2",
+                reason="more complete",
+            ),
+            module.DirectJudgeRank(
+                rank=2,
+                trajectory_id="YYSP-TXSP-468faa-9-1",
+                reason="less complete",
+            ),
+        ]
+    )
+
+    normalized = module._normalize_response(response, _task(), trajectories)
+
+    assert [item.trajectory_id for item in normalized.ranking] == [
+        "task-folder__YYSP-TXSP-468faa-9-2",
+        "task-folder__YYSP-TXSP-468faa-9-1",
+    ]

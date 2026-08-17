@@ -245,6 +245,36 @@ def _trajectory_matches_id(trajectory: Trajectory, requested_id: str) -> bool:
     return trajectory.trajectory_id == requested_id or source_session_id == requested_id
 
 
+def _clean_trajectory_id(value: Any) -> str:
+    return str(value).strip().strip("`").strip()
+
+
+def _trajectory_aliases(trajectory: Trajectory) -> set[str]:
+    aliases = {trajectory.trajectory_id}
+    source_session_id = str(trajectory.metadata.get("source_session_id", "")).strip()
+    if source_session_id:
+        aliases.add(source_session_id)
+    if "__" in trajectory.trajectory_id:
+        aliases.add(trajectory.trajectory_id.split("__", 1)[1])
+    return {alias for alias in aliases if alias}
+
+
+def _trajectory_alias_map(trajectories: list[Trajectory]) -> dict[str, str]:
+    alias_to_id: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for trajectory in trajectories:
+        for alias in _trajectory_aliases(trajectory):
+            cleaned = _clean_trajectory_id(alias)
+            existing = alias_to_id.get(cleaned)
+            if existing is not None and existing != trajectory.trajectory_id:
+                ambiguous.add(cleaned)
+                continue
+            alias_to_id[cleaned] = trajectory.trajectory_id
+    for alias in ambiguous:
+        alias_to_id.pop(alias, None)
+    return alias_to_id
+
+
 def _select_direct_judge_trajectories(
     trajectories: list[Trajectory],
     config: Config,
@@ -303,6 +333,9 @@ def _format_action_input(action_input: Any) -> str:
 
 def format_trajectory_for_direct_judge(trajectory: Trajectory) -> str:
     lines = [f"## Trajectory `{trajectory.trajectory_id}`"]
+    source_session_id = str(trajectory.metadata.get("source_session_id", "")).strip()
+    if source_session_id and source_session_id != trajectory.trajectory_id:
+        lines.append(f"Source Session ID: `{source_session_id}`")
     for step in trajectory.steps:
         lines.extend(
             [
@@ -446,8 +479,20 @@ def _normalize_response(
     trajectories: list[Trajectory],
 ) -> DirectJudgeResponse:
     expected_ids = [trajectory.trajectory_id for trajectory in trajectories]
+    alias_to_id = _trajectory_alias_map(trajectories)
+    ranked = [
+        DirectJudgeRank(
+            rank=item.rank,
+            trajectory_id=alias_to_id.get(
+                _clean_trajectory_id(item.trajectory_id),
+                item.trajectory_id,
+            ),
+            reason=item.reason,
+        )
+        for item in response.ranking
+    ]
     expected_set = set(expected_ids)
-    ranked = [item for item in response.ranking if item.trajectory_id in expected_set]
+    ranked = [item for item in ranked if item.trajectory_id in expected_set]
     ranked_ids = {item.trajectory_id for item in ranked}
     missing = [trajectory_id for trajectory_id in expected_ids if trajectory_id not in ranked_ids]
     if missing:
@@ -668,12 +713,24 @@ async def judge_task(
             )
             append_jsonl(output_path, result)
             existing[key] = result
+        print_direct_judge_result(result)
         results.append(result)
     return results
 
 
 def _ranking_string(result: DirectJudgeResult) -> str:
     return ">".join(item.trajectory_id for item in result.response.ranking)
+
+
+def print_direct_judge_result(result: DirectJudgeResult) -> None:
+    print(
+        f"Direct judge result: task={result.task.task_id}, "
+        f"run={result.run_number}, ranking={_ranking_string(result)}"
+    )
+    for item in result.response.ranking:
+        print(f"  {item.rank}. {item.trajectory_id}: {item.reason}")
+    if result.response.overall_reason:
+        print(f"  Overall: {result.response.overall_reason}")
 
 
 def build_report(results: list[DirectJudgeResult], source_workbook: Path) -> str:
