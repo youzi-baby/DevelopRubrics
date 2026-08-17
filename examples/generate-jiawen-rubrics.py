@@ -355,8 +355,6 @@ def _all_text(trajectory: Trajectory) -> str:
     if trajectory.final_answer:
         parts.append(trajectory.final_answer)
     for step in trajectory.steps:
-        if step.thought:
-            parts.append(step.thought)
         parts.append(step.action)
         parts.append(step.observation)
     return "\n".join(parts)
