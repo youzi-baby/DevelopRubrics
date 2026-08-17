@@ -52,7 +52,9 @@ hidden intentions, do not use chain-of-thought, and do not rely on hidden
 annotations.
 
 Rank trajectories from best to worst according to whether they actually achieve
-the user's task goal and how well the observable execution supports that result.
+the user's task goal and how well the observable execution supports that result."""
+
+DIRECT_JUDGE_COMPLETION_FIRST = """\
 Completion of the requested task is the most important criterion. If completion
 evidence is ambiguous, treat it conservatively and explain the uncertainty."""
 
@@ -285,17 +287,28 @@ def format_trajectory_for_direct_judge(trajectory: Trajectory) -> str:
 def build_messages(
     task: TaskDescription,
     trajectories: list[Trajectory],
+    *,
+    config: Config,
 ) -> list[dict[str, str]]:
     trajectory_text = "\n\n".join(
         format_trajectory_for_direct_judge(trajectory) for trajectory in trajectories
     )
+    system_content = DIRECT_JUDGE_SYSTEM
+    if _bool_setting(
+        config,
+        "direct_judge_completion_first",
+        "ADARUBRIC_DIRECT_JUDGE_COMPLETION_FIRST",
+        default=False,
+    ):
+        system_content += "\n\n" + DIRECT_JUDGE_COMPLETION_FIRST
+
     user_content = DIRECT_JUDGE_USER.format(
         task_id=task.task_id,
         instruction=task.instruction,
         trajectory_text=trajectory_text,
     )
     return [
-        {"role": "system", "content": DIRECT_JUDGE_SYSTEM},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
 
@@ -403,7 +416,7 @@ async def judge_task_once(
     config: Config,
     run_number: int,
 ) -> DirectJudgeResult:
-    messages = build_messages(task, trajectories)
+    messages = build_messages(task, trajectories, config=config)
     response = await client.generate_structured(
         messages,
         DirectJudgeResponse,
