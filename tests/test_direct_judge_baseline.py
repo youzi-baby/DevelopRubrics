@@ -62,6 +62,14 @@ def _prefixed_trajectory(source_session_id: str) -> Trajectory:
     )
 
 
+class _FakeClient:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = outputs
+
+    async def generate_text(self, *_args, **_kwargs) -> str:
+        return self.outputs.pop(0)
+
+
 def test_completion_first_prompt_is_off_by_default():
     module = _load_module()
 
@@ -84,6 +92,16 @@ def test_completion_first_prompt_can_be_enabled():
     assert "Completion of the requested task is the most important criterion" in messages[0][
         "content"
     ]
+
+
+def test_prompt_does_not_include_copyable_trajectory_id_placeholder():
+    module = _load_module()
+
+    messages = module.build_messages(_task(), [_trajectory()], config={})
+    prompt = "\n".join(message["content"] for message in messages)
+
+    assert "one exact trajectory_id or candidate label" not in prompt
+    assert '"trajectory_id": "C1"' in prompt
 
 
 def test_parse_direct_judge_response_accepts_ranking_array():
@@ -212,5 +230,33 @@ def test_response_from_candidate_mentions_recovers_text_ranking():
     assert [item.trajectory_id for item in response.ranking] == [
         "task-folder__YYSP-TXSP-468faa-9-2",
         "task-folder__YYSP-TXSP-468faa-9-5",
+        "task-folder__YYSP-TXSP-468faa-9-1",
+    ]
+
+
+async def test_judge_task_once_falls_back_when_json_contains_placeholder(tmp_path):
+    module = _load_module()
+    trajectories = [
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-1"),
+        _prefixed_trajectory("YYSP-TXSP-468faa-9-2"),
+    ]
+    raw = (
+        '{"ranking": [{"rank": 1, '
+        '"trajectory_id": "one exact trajectory_id or candidate label", '
+        '"reason": "bad placeholder"}]}\n'
+        "Actual ranking: C2 > C1"
+    )
+    client = _FakeClient([raw, raw])
+
+    result = await module.judge_task_once(
+        client=client,
+        task=_task(),
+        trajectories=trajectories,
+        config={"direct_judge_raw_response_path": str(tmp_path / "raw.jsonl")},
+        run_number=1,
+    )
+
+    assert [item.trajectory_id for item in result.response.ranking] == [
+        "task-folder__YYSP-TXSP-468faa-9-2",
         "task-folder__YYSP-TXSP-468faa-9-1",
     ]

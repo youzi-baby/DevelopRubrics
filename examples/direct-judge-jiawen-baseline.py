@@ -90,7 +90,7 @@ the JSON. The JSON object must have this exact shape:
   "ranking": [
     {{
       "rank": 1,
-      "trajectory_id": "one exact trajectory_id or candidate label",
+      "trajectory_id": "C1",
       "reason": "concise observable reason"
     }}
   ],
@@ -102,6 +102,7 @@ Rules:
 - rank must be consecutive integers starting at 1.
 - Prefer exact trajectory_id values when possible.
 - If an ID is too long to copy safely, use its candidate label instead: {candidate_labels}.
+- Never output descriptive placeholder text; use only listed IDs or labels.
 - Do not include scores, pass/fail labels, hidden thoughts, or final_answer.\
 """
 
@@ -704,6 +705,16 @@ async def _repair_direct_judge_response(
     return _parse_direct_judge_response(repaired, task=task)
 
 
+def _parse_and_normalize_response(
+    raw: str,
+    *,
+    task: TaskDescription,
+    trajectories: list[Trajectory],
+) -> DirectJudgeResponse:
+    response = _parse_direct_judge_response(raw, task=task)
+    return _normalize_response(response, task, trajectories)
+
+
 async def judge_task_once(
     *,
     client: OpenAIClient,
@@ -747,10 +758,14 @@ async def judge_task_once(
         raw=raw,
     )
     try:
-        response = _parse_direct_judge_response(raw, task=task)
+        response = _parse_and_normalize_response(
+            raw,
+            task=task,
+            trajectories=trajectories,
+        )
     except (SyntaxError, ValidationError, json.JSONDecodeError, ValueError) as parse_exc:
         try:
-            response = await _repair_direct_judge_response(
+            repaired_response = await _repair_direct_judge_response(
                 client=client,
                 raw=raw,
                 task=task,
@@ -759,6 +774,7 @@ async def judge_task_once(
                 raw_response_path=raw_response_path,
                 run_number=run_number,
             )
+            response = _normalize_response(repaired_response, task, trajectories)
         except (SyntaxError, ValidationError, json.JSONDecodeError, ValueError) as repair_exc:
             try:
                 response = _response_from_candidate_mentions(
@@ -781,7 +797,6 @@ async def judge_task_once(
                     },
                 ) from repair_exc
 
-    response = _normalize_response(response, task, trajectories)
     return DirectJudgeResult(
         task=task,
         run_number=run_number,
