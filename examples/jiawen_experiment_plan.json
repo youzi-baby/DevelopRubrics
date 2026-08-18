@@ -1,0 +1,7 @@
+{
+  "experiments": [
+    "evaluate",
+    "evaluate-no-thinking",
+    "direct-judge"
+  ]
+}

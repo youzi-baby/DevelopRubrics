@@ -26,6 +26,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "examples" / "jiawen_rubric_config.json"
+DEFAULT_PLAN_PATH = PROJECT_ROOT / "examples" / "jiawen_experiment_plan.json"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "docs" / "experiments"
 
 Config = dict[str, Any]
@@ -58,6 +59,18 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "evaluation_jsonl_path": "jiawen_gui_eval.jsonl",
         },
         fixed_overrides={"evaluation_resume_from_jsonl": False},
+    ),
+    "evaluate-no-thinking": ExperimentSpec(
+        name="evaluate-no-thinking",
+        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
+        output_overrides={
+            "evaluation_report_path": "jiawen_gui_eval_no_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_no_thinking.jsonl",
+        },
+        fixed_overrides={
+            "evaluation_resume_from_jsonl": False,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
     ),
     "direct-judge": ExperimentSpec(
         name="direct-judge",
@@ -95,12 +108,18 @@ def parse_args() -> argparse.Namespace:
         help="Date prefix for experiment folders, e.g. 20260818. Defaults to today.",
     )
     parser.add_argument(
+        "--plan",
+        type=Path,
+        default=DEFAULT_PLAN_PATH,
+        help=f"Experiment plan JSON. Defaults to {DEFAULT_PLAN_PATH}",
+    )
+    parser.add_argument(
         "--experiments",
-        default="evaluate,direct-judge",
+        default=None,
         help=(
-            "Comma-separated experiment names. Available: "
+            "Optional comma-separated experiment override. Available: "
             + ", ".join(sorted(EXPERIMENTS))
-            + ". Defaults to evaluate,direct-judge."
+            + ". If omitted, experiments are read from --plan."
         ),
     )
     parser.add_argument(
@@ -121,6 +140,21 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ValueError(f"Config file must contain a JSON object: {path}")
     return data
+
+
+def load_experiment_names(*, plan_path: Path, override: str | None) -> list[str]:
+    if override:
+        return [name.strip() for name in override.split(",") if name.strip()]
+
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return [str(name).strip() for name in data if str(name).strip()]
+    if isinstance(data, dict):
+        configured = data.get("experiments", [])
+        if not isinstance(configured, list):
+            raise ValueError(f"experiments in plan must be a list: {plan_path}")
+        return [str(name).strip() for name in configured if str(name).strip()]
+    raise ValueError(f"Experiment plan must be a JSON object or list: {plan_path}")
 
 
 def _relative_to_project(path: Path) -> str:
@@ -198,11 +232,12 @@ def run_command(command: list[str], *, cwd: Path, log_path: Path) -> int:
 def main() -> int:
     args = parse_args()
     base_config_path = args.config if args.config.is_absolute() else PROJECT_ROOT / args.config
+    plan_path = args.plan if args.plan.is_absolute() else PROJECT_ROOT / args.plan
     output_root = (
         args.output_root if args.output_root.is_absolute() else PROJECT_ROOT / args.output_root
     )
     base_config = load_config(base_config_path)
-    experiment_names = [name.strip() for name in args.experiments.split(",") if name.strip()]
+    experiment_names = load_experiment_names(plan_path=plan_path, override=args.experiments)
     unknown = [name for name in experiment_names if name not in EXPERIMENTS]
     if unknown:
         raise ValueError(f"Unknown experiment(s): {unknown}. Available: {sorted(EXPERIMENTS)}")
@@ -232,6 +267,7 @@ def main() -> int:
             "experiment_name": name,
             "script": _relative_to_project(spec.script),
             "base_config": _relative_to_project(base_config_path),
+            "plan": _relative_to_project(plan_path),
             "generated_config": _relative_to_project(config_path),
             "log_path": _relative_to_project(log_path),
             "command": command,
