@@ -9,7 +9,13 @@ _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DO
 
 def strip_thinking(text: str) -> str:
     """Remove model thinking blocks before parsing or saving final answers."""
-    return _THINK_BLOCK_RE.sub("", text).strip()
+    stripped = _THINK_BLOCK_RE.sub("", text)
+    lower = stripped.lower()
+    end_tag = "</think>"
+    last_end = lower.rfind(end_tag)
+    if last_end != -1:
+        stripped = stripped[last_end + len(end_tag) :]
+    return stripped.strip()
 
 
 def _strip_fence(text: str) -> str:

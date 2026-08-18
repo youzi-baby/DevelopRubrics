@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
+from adarubric.core.exceptions import LLMClientError
 from adarubric.llm.openai_client import OpenAIClient, _extra_body_from_env, parse_extra_body
 
 
@@ -48,3 +49,13 @@ async def test_generate_structured_skips_non_schema_json_candidates():
     response = await client.generate_structured([], _TinyResponse)
 
     assert response == _TinyResponse(trajectory_id="traj-1", task_id="task-1")
+
+
+async def test_generate_structured_does_not_report_coordinate_array_as_primary_error():
+    client = _FakeOpenAIClient("Clicked coordinate [384, 483]\ntruncated final JSON")
+
+    with pytest.raises(LLMClientError) as exc_info:
+        await client.generate_structured([], _TinyResponse)
+
+    assert "no JSON object candidate matched schema" in str(exc_info.value)
+    assert exc_info.value.context["candidate_count"] == 0

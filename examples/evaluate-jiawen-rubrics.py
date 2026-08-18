@@ -35,6 +35,7 @@ from adarubric import (
     TaskDescription,
     Trajectory,
     TrajectoryEvaluation,
+    TrajectoryStep,
 )
 from adarubric.core.exceptions import EvaluationError
 from adarubric.evaluator.aggregator import (
@@ -518,6 +519,18 @@ def _evaluation_settings(config: Config) -> dict[str, Any]:
             "ADARUBRIC_EVAL_MAX_TOKENS",
             default=8192,
         ),
+        "evaluation_include_action": _bool_setting(
+            config,
+            "evaluation_include_action",
+            "ADARUBRIC_EVAL_INCLUDE_ACTION",
+            default=True,
+        ),
+        "evaluation_include_action_input": _bool_setting(
+            config,
+            "evaluation_include_action_input",
+            "ADARUBRIC_EVAL_INCLUDE_ACTION_INPUT",
+            default=True,
+        ),
         "evaluation_step_chunk_overlap": _int_setting(
             config,
             "evaluation_step_chunk_overlap",
@@ -551,6 +564,7 @@ def _evaluation_settings(config: Config) -> dict[str, Any]:
             "ADARUBRIC_RECENCY_DECAY",
             default=1.0,
         ),
+        "extra_body": GEN._extra_body_setting(config),
     }
 
 
@@ -666,6 +680,40 @@ def _trajectory_chunks(
     return chunks
 
 
+def _trajectory_for_evaluation(
+    trajectory: Trajectory,
+    *,
+    include_action: bool,
+    include_action_input: bool,
+) -> Trajectory:
+    if include_action and include_action_input:
+        return trajectory
+
+    steps = [
+        TrajectoryStep(
+            step_id=step.step_id,
+            action=step.action if include_action else "Action hidden for this ablation.",
+            action_input=step.action_input if include_action_input else {},
+            observation=step.observation,
+        )
+        for step in trajectory.steps
+    ]
+    metadata = dict(trajectory.metadata)
+    metadata.update(
+        {
+            "evaluation_include_action": include_action,
+            "evaluation_include_action_input": include_action_input,
+        }
+    )
+    return Trajectory(
+        trajectory_id=trajectory.trajectory_id,
+        task_id=trajectory.task_id,
+        steps=steps,
+        final_answer=trajectory.final_answer,
+        metadata=metadata,
+    )
+
+
 async def evaluate_trajectory(
     *,
     pipeline: AdaRubricPipeline,
@@ -676,6 +724,23 @@ async def evaluate_trajectory(
     temperature: float,
     eval_max_tokens: int,
 ) -> TrajectoryEvaluation:
+    include_action = _bool_setting(
+        config,
+        "evaluation_include_action",
+        "ADARUBRIC_EVAL_INCLUDE_ACTION",
+        default=True,
+    )
+    include_action_input = _bool_setting(
+        config,
+        "evaluation_include_action_input",
+        "ADARUBRIC_EVAL_INCLUDE_ACTION_INPUT",
+        default=True,
+    )
+    trajectory = _trajectory_for_evaluation(
+        trajectory,
+        include_action=include_action,
+        include_action_input=include_action_input,
+    )
     chunk_enabled = _bool_setting(
         config,
         "evaluation_chunk_enabled",
@@ -703,13 +768,25 @@ async def evaluate_trajectory(
     )
 
     if not chunk_enabled or len(trajectory.steps) <= chunk_threshold:
-        return await pipeline.evaluate(
+        evaluation = await pipeline.evaluate(
             trajectory,
             rubric,
             temperature=temperature,
             task_instruction=task.instruction,
             max_tokens=eval_max_tokens,
         )
+        evaluation.metadata.update(
+            {
+                "evaluation_chunk_enabled": chunk_enabled,
+                "evaluation_chunk_threshold": chunk_threshold,
+                "evaluation_step_chunk_size": chunk_size,
+                "evaluation_step_chunk_overlap": chunk_overlap,
+                "evaluation_num_chunks": 1,
+                "evaluation_include_action": include_action,
+                "evaluation_include_action_input": include_action_input,
+            }
+        )
+        return evaluation
 
     chunks = _trajectory_chunks(
         trajectory,
@@ -773,6 +850,8 @@ async def evaluate_trajectory(
             "evaluation_step_chunk_size": chunk_size,
             "evaluation_step_chunk_overlap": chunk_overlap,
             "evaluation_num_chunks": len(chunks),
+            "evaluation_include_action": include_action,
+            "evaluation_include_action_input": include_action_input,
         },
     )
 

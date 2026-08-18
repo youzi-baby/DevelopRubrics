@@ -3,9 +3,10 @@
 Example:
     .venv\\Scripts\\python examples\\run-jiawen-experiments.py
 
-By default this runs:
-    1. examples\\evaluate-jiawen-rubrics.py
-    2. examples\\direct-judge-jiawen-baseline.py
+By default this runs three scoring ablations:
+    1. observation-only input, Qwen thinking disabled
+    2. action + action_input input, Qwen thinking disabled
+    3. observation-only input, Qwen thinking enabled
 
 Each experiment receives a new folder under docs/experiments, such as
 2026081801, 2026081802, and a generated config whose output paths point into
@@ -51,37 +52,47 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         },
         fixed_overrides={},
     ),
-    "evaluate": ExperimentSpec(
-        name="evaluate",
+    "eval-observation-no-thinking": ExperimentSpec(
+        name="eval-observation-no-thinking",
         script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
         output_overrides={
-            "evaluation_report_path": "jiawen_gui_eval.md",
-            "evaluation_jsonl_path": "jiawen_gui_eval.jsonl",
-        },
-        fixed_overrides={"evaluation_resume_from_jsonl": False},
-    ),
-    "evaluate-no-thinking": ExperimentSpec(
-        name="evaluate-no-thinking",
-        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
-        output_overrides={
-            "evaluation_report_path": "jiawen_gui_eval_no_thinking.md",
-            "evaluation_jsonl_path": "jiawen_gui_eval_no_thinking.jsonl",
+            "evaluation_report_path": "jiawen_gui_eval_observation_no_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_observation_no_thinking.jsonl",
         },
         fixed_overrides={
             "evaluation_resume_from_jsonl": False,
+            "evaluation_include_action": False,
+            "evaluation_include_action_input": False,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
     ),
-    "direct-judge": ExperimentSpec(
-        name="direct-judge",
-        script=PROJECT_ROOT / "examples" / "direct-judge-jiawen-baseline.py",
+    "eval-action-no-thinking": ExperimentSpec(
+        name="eval-action-no-thinking",
+        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
         output_overrides={
-            "direct_judge_jsonl_path": "jiawen_direct_judge_baseline.jsonl",
-            "direct_judge_report_path": "jiawen_direct_judge_baseline.md",
-            "direct_judge_csv_path": "jiawen_direct_judge_baseline.csv",
-            "direct_judge_raw_response_path": "jiawen_direct_judge_baseline.raw_response.jsonl",
+            "evaluation_report_path": "jiawen_gui_eval_action_no_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_action_no_thinking.jsonl",
         },
-        fixed_overrides={"direct_judge_resume_from_jsonl": False},
+        fixed_overrides={
+            "evaluation_resume_from_jsonl": False,
+            "evaluation_include_action": True,
+            "evaluation_include_action_input": True,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
+    ),
+    "eval-observation-thinking": ExperimentSpec(
+        name="eval-observation-thinking",
+        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
+        output_overrides={
+            "evaluation_report_path": "jiawen_gui_eval_observation_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_observation_thinking.jsonl",
+        },
+        fixed_overrides={
+            "evaluation_resume_from_jsonl": False,
+            "evaluation_include_action": False,
+            "evaluation_include_action_input": False,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        },
     ),
 }
 

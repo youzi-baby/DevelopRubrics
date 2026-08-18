@@ -40,13 +40,13 @@ def test_load_experiment_names_from_plan_file(tmp_path):
     module = _load_module()
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
-        json.dumps({"experiments": ["evaluate", "evaluate-no-thinking"]}),
+        json.dumps({"experiments": ["eval-observation-no-thinking", "eval-action-no-thinking"]}),
         encoding="utf-8",
     )
 
     assert module.load_experiment_names(plan_path=plan_path, override=None) == [
-        "evaluate",
-        "evaluate-no-thinking",
+        "eval-observation-no-thinking",
+        "eval-action-no-thinking",
     ]
 
 
@@ -56,60 +56,72 @@ def test_load_experiment_names_override_skips_plan(tmp_path):
 
     assert module.load_experiment_names(
         plan_path=missing_plan,
-        override="direct-judge,evaluate",
-    ) == ["direct-judge", "evaluate"]
+        override="eval-action-no-thinking,eval-observation-thinking",
+    ) == ["eval-action-no-thinking", "eval-observation-thinking"]
 
 
-def test_build_evaluate_config_points_outputs_to_experiment_dir(tmp_path):
+def test_build_observation_no_thinking_config_points_outputs_to_experiment_dir(tmp_path):
     module = _load_module()
-    spec = module.EXPERIMENTS["evaluate"]
+    spec = module.EXPERIMENTS["eval-observation-no-thinking"]
     config = module.build_experiment_config(
-        {"evaluation_resume_from_jsonl": True, "model": "qwen"},
+        {
+            "evaluation_resume_from_jsonl": True,
+            "model": "qwen",
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        },
         spec,
         PROJECT_ROOT / "docs" / "experiments" / "2026081801",
     )
 
     assert config["model"] == "qwen"
     assert config["evaluation_resume_from_jsonl"] is False
-    assert config["evaluation_report_path"] == "docs/experiments/2026081801/jiawen_gui_eval.md"
-    assert config["evaluation_jsonl_path"] == "docs/experiments/2026081801/jiawen_gui_eval.jsonl"
+    assert config["evaluation_include_action"] is False
+    assert config["evaluation_include_action_input"] is False
+    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert config["evaluation_report_path"] == (
+        "docs/experiments/2026081801/jiawen_gui_eval_observation_no_thinking.md"
+    )
+    assert config["evaluation_jsonl_path"] == (
+        "docs/experiments/2026081801/jiawen_gui_eval_observation_no_thinking.jsonl"
+    )
 
 
-def test_build_direct_judge_config_points_outputs_to_experiment_dir():
+def test_build_action_no_thinking_config_includes_action_fields():
     module = _load_module()
-    spec = module.EXPERIMENTS["direct-judge"]
+    spec = module.EXPERIMENTS["eval-action-no-thinking"]
     config = module.build_experiment_config(
-        {"direct_judge_resume_from_jsonl": True},
+        {"evaluation_include_action": False, "evaluation_include_action_input": False},
         spec,
         PROJECT_ROOT / "docs" / "experiments" / "2026081802",
     )
 
-    assert config["direct_judge_resume_from_jsonl"] is False
-    assert config["direct_judge_jsonl_path"] == (
-        "docs/experiments/2026081802/jiawen_direct_judge_baseline.jsonl"
-    )
-    assert config["direct_judge_raw_response_path"] == (
-        "docs/experiments/2026081802/jiawen_direct_judge_baseline.raw_response.jsonl"
+    assert config["evaluation_include_action"] is True
+    assert config["evaluation_include_action_input"] is True
+    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert config["evaluation_report_path"] == (
+        "docs/experiments/2026081802/jiawen_gui_eval_action_no_thinking.md"
     )
 
 
-def test_build_evaluate_no_thinking_config_disables_qwen_thinking():
+def test_build_observation_thinking_config_enables_qwen_thinking():
     module = _load_module()
-    spec = module.EXPERIMENTS["evaluate-no-thinking"]
+    spec = module.EXPERIMENTS["eval-observation-thinking"]
     config = module.build_experiment_config(
         {
             "evaluation_resume_from_jsonl": True,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
         spec,
         PROJECT_ROOT / "docs" / "experiments" / "2026081803",
     )
 
     assert config["evaluation_resume_from_jsonl"] is False
-    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert config["evaluation_include_action"] is False
+    assert config["evaluation_include_action_input"] is False
+    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
     assert config["evaluation_report_path"] == (
-        "docs/experiments/2026081803/jiawen_gui_eval_no_thinking.md"
+        "docs/experiments/2026081803/jiawen_gui_eval_observation_thinking.md"
     )
     assert config["evaluation_jsonl_path"] == (
-        "docs/experiments/2026081803/jiawen_gui_eval_no_thinking.jsonl"
+        "docs/experiments/2026081803/jiawen_gui_eval_observation_thinking.jsonl"
     )

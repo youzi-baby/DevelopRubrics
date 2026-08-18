@@ -34,6 +34,12 @@ def test_strip_thinking_block_case_insensitive():
     assert extract_json_substring(raw) == '[{"rank": 1}]'
 
 
+def test_strip_orphan_thinking_end_tag_keeps_final_answer_only():
+    raw = 'scratch {"wrong": true} </think>\n{"final": true}'
+    assert strip_thinking(raw) == '{"final": true}'
+    assert extract_json_substring(raw) == '{"final": true}'
+
+
 def test_extract_json_candidates_preserves_coordinate_and_response_order():
     raw = 'Clicked at [384, 483].\n{"trajectory_id": "traj-1", "task_id": "task-1"}'
     assert extract_json_candidates(raw)[:2] == [

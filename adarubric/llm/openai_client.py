@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from adarubric.core.exceptions import LLMClientError
 from adarubric.llm.base import LLMClient
-from adarubric.llm.json_extract import extract_json_candidates, extract_json_substring
+from adarubric.llm.json_extract import extract_json_candidates
 
 try:
     from openai import (
@@ -184,25 +184,27 @@ class OpenAIClient(LLMClient):
                 context={"model": self.model},
             ) from exc
 
-        extracted = extract_json_substring(raw)
-        errors: list[str] = []
-        for candidate in extract_json_candidates(raw):
+        candidates = [
+            candidate
+            for candidate in extract_json_candidates(raw)
+            if candidate.lstrip().startswith("{")
+        ]
+        errors: list[dict[str, str]] = []
+        for candidate in candidates:
             try:
                 return response_model.model_validate_json(candidate)
             except (ValidationError, json.JSONDecodeError) as exc:
-                errors.append(str(exc))
+                errors.append({"candidate": candidate[:200], "error": str(exc)})
 
-        try:
-            return response_model.model_validate_json(extracted)
-        except (ValidationError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to parse LLM response, raw output:\n%s", raw)
-            raise LLMClientError(
-                f"Failed to parse structured response: {exc}",
-                context={
-                    "raw_response": raw[:500],
-                    "candidate_errors": errors[:5],
-                },
-            ) from exc
+        logger.warning("Failed to parse LLM response, raw output:\n%s", raw)
+        raise LLMClientError(
+            "Failed to parse structured response: no JSON object candidate matched schema",
+            context={
+                "raw_response": raw[:1000],
+                "candidate_count": len(candidates),
+                "candidate_errors": errors[:5],
+            },
+        )
 
     async def generate_text(
         self,

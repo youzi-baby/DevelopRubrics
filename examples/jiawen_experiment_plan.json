@@ -1,7 +1,7 @@
 {
   "experiments": [
-    "evaluate",
-    "evaluate-no-thinking",
-    "direct-judge"
+    "eval-observation-no-thinking",
+    "eval-action-no-thinking",
+    "eval-observation-thinking"
   ]
 }
