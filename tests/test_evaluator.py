@@ -191,3 +191,41 @@ async def test_llm_evaluator_does_not_send_thoughts(
     assert "**Thought**" not in prompt_text
     for step in sample_trajectory.steps:
         assert step.thought not in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_llm_evaluator_targets_step_ids_with_full_context(sample_trajectory, sample_rubric):
+    raw = """
+    {
+      "trajectory_id": "traj",
+      "task_id": "task",
+      "step_evaluations": [
+        {
+          "step_id": 0,
+          "dimension_scores": [
+            {"dimension_name": "SearchStrategyQuality", "score": 1, "confidence": 1.0},
+            {"dimension_name": "DataExtractionAccuracy", "score": 1, "confidence": 1.0}
+          ],
+          "step_quality_summary": "Extra context step."
+        },
+        {
+          "step_id": 1,
+          "dimension_scores": [
+            {"dimension_name": "SearchStrategyQuality", "score": 4, "confidence": 1.0},
+            {"dimension_name": "DataExtractionAccuracy", "score": 5, "confidence": 1.0}
+          ],
+          "step_quality_summary": "Target step."
+        }
+      ]
+    }
+    """
+    client = MockLLMClient({"_EvaluationResponse": raw})
+    ev = LLMTrajectoryEvaluator(client)
+
+    result = await ev.evaluate(sample_trajectory, sample_rubric, target_step_ids={1})
+
+    prompt_text = "\n".join(message["content"] for message in client.last_messages)
+    assert "Return step_evaluations only for these target step_ids: [1]" in prompt_text
+    assert "--- Step 0 [CONTEXT ONLY - DO NOT SCORE] ---" in prompt_text
+    assert "--- Step 1 [TARGET - SCORE THIS STEP] ---" in prompt_text
+    assert [step.step_id for step in result.step_evaluations] == [1]

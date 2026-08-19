@@ -91,6 +91,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
         trajectory: Trajectory,
         rubric: DynamicRubric,
         task_instruction: str,
+        target_step_ids: set[int] | None = None,
     ) -> list[dict[str, str]]:
         rubric_data: dict[str, Any] = {
             "dimensions": [
@@ -116,10 +117,26 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
             for s in trajectory.steps
         ]
 
+        if target_step_ids is None:
+            evaluation_scope = "Evaluate every listed step."
+        else:
+            evaluation_scope = (
+                "The listed trajectory contains both context steps and target steps. "
+                f"Return step_evaluations only for these target step_ids: "
+                f"{sorted(target_step_ids)}. Do not output evaluations for context-only "
+                "steps. Use context steps only to understand prior state and the immediate "
+                "next observation; do not merge context-step actions or outcomes into a "
+                "target step's score."
+            )
+
         user_content = EVALUATION_USER.format(
             rubric_json=json.dumps(rubric_data, indent=2),
             instruction=task_instruction,
-            trajectory_text=format_trajectory_steps(steps_data),
+            evaluation_scope=evaluation_scope,
+            trajectory_text=format_trajectory_steps(
+                steps_data,
+                target_step_ids=target_step_ids,
+            ),
         )
 
         return [
@@ -132,6 +149,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
         raw: _EvaluationResponse,
         trajectory: Trajectory,
         rubric: DynamicRubric,
+        target_step_ids: set[int] | None = None,
     ) -> TrajectoryEvaluation:
         """Convert parsed LLM output into the canonical evaluation model."""
         by_step: dict[int, _StepEvalRaw] = {}
@@ -143,7 +161,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
                 )
             by_step[raw_step.step_id] = raw_step
 
-        expected_ids = {s.step_id for s in trajectory.steps}
+        expected_ids = target_step_ids or {s.step_id for s in trajectory.steps}
         missing = expected_ids - by_step.keys()
         extra = by_step.keys() - expected_ids
         if missing:
@@ -159,7 +177,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
                 trajectory.trajectory_id,
             )
 
-        ordered_ids = sorted(by_step.keys())
+        ordered_ids = sorted(by_step.keys() & expected_ids)
         step_evals: list[StepEvaluation] = []
         for raw_step in (by_step[i] for i in ordered_ids):
             valid_dims = rubric.dimension_names
@@ -212,8 +230,14 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
         temperature: float = 0.0,
         task_instruction: str = "",
         max_tokens: int | None = None,
+        target_step_ids: set[int] | None = None,
     ) -> TrajectoryEvaluation:
-        messages = self._build_messages(trajectory, rubric, task_instruction)
+        messages = self._build_messages(
+            trajectory,
+            rubric,
+            task_instruction,
+            target_step_ids=target_step_ids,
+        )
         budget = max_tokens if max_tokens is not None else self._max_tokens
 
         try:
@@ -232,7 +256,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
                 },
             ) from exc
 
-        result = self._convert_raw(raw, trajectory, rubric)
+        result = self._convert_raw(raw, trajectory, rubric, target_step_ids=target_step_ids)
 
         logger.info(
             "Evaluated trajectory %s: global_score=%.3f (%d steps, %d dimensions)",

@@ -49,3 +49,32 @@ def test_trajectory_for_evaluation_can_hide_action_and_action_input():
     assert "[384,483]" not in prepared.steps[0].action
     assert prepared.metadata["evaluation_include_action"] is False
     assert prepared.metadata["evaluation_include_action_input"] is False
+
+
+def test_trajectory_chunks_use_history_plus_lookahead_context():
+    module = _load_module()
+    trajectory = Trajectory(
+        trajectory_id="traj-1",
+        task_id="task-1",
+        steps=[
+            TrajectoryStep(
+                step_id=step_id,
+                action="click",
+                action_input={},
+                observation=f"observation {step_id}",
+            )
+            for step_id in range(1, 8)
+        ],
+    )
+
+    chunks = module._trajectory_chunks(trajectory, lookahead_steps=1)
+
+    assert len(chunks) == 7
+    assert [step.step_id for step in chunks[0].trajectory.steps] == [1, 2]
+    assert [step.step_id for step in chunks[4].trajectory.steps] == [1, 2, 3, 4, 5, 6]
+    assert [step.step_id for step in chunks[6].trajectory.steps] == [1, 2, 3, 4, 5, 6, 7]
+    assert chunks[0].core_step_ids == {1}
+    assert chunks[4].core_step_ids == {5}
+    assert chunks[6].core_step_ids == {7}
+    assert chunks[0].trajectory.metadata["chunk_input_mode"] == "history_plus_lookahead"
+    assert chunks[0].trajectory.metadata["chunk_lookahead_steps"] == 1

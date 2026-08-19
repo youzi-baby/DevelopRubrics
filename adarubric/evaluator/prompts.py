@@ -61,6 +61,10 @@ EVALUATION_USER = """\
 
 **Task Instruction**: {instruction}
 
+### Evaluation Scope
+
+{evaluation_scope}
+
 **Steps**:
 {trajectory_text}
 
@@ -68,11 +72,20 @@ Evaluate this trajectory against the rubric now.\
 """
 
 
-def format_trajectory_steps(steps: list[dict[str, Any]]) -> str:
+def format_trajectory_steps(
+    steps: list[dict[str, Any]],
+    *,
+    target_step_ids: set[int] | None = None,
+) -> str:
     """Render trajectory steps as readable text for the LLM prompt."""
     parts: list[str] = []
     for step in steps:
-        lines = [f"--- Step {step['step_id']} ---"]
+        step_id = step["step_id"]
+        if target_step_ids is None or step_id in target_step_ids:
+            label = "TARGET - SCORE THIS STEP"
+        else:
+            label = "CONTEXT ONLY - DO NOT SCORE"
+        lines = [f"--- Step {step_id} [{label}] ---"]
         lines.append(f"**Action**: {step['action']}")
         if step.get("action_input"):
             lines.append(f"**Action Input**: {step['action_input']}")

@@ -259,6 +259,7 @@ class AdaRubricPipeline:
         temperature: float = 0.0,
         task_instruction: str = "",
         max_tokens: int | None = None,
+        target_step_ids: set[int] | None = None,
     ) -> TrajectoryEvaluation:
         """Stage 2: Evaluate a single trajectory against a rubric."""
         mt = max_tokens if max_tokens is not None else _default_eval_max_tokens(self._config)
@@ -268,6 +269,7 @@ class AdaRubricPipeline:
             temperature=temperature,
             task_instruction=task_instruction,
             max_tokens=mt,
+            target_step_ids=target_step_ids,
         )
 
     async def evaluate_batch(

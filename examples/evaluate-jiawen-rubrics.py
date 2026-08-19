@@ -531,19 +531,14 @@ def _evaluation_settings(config: Config) -> dict[str, Any]:
             "ADARUBRIC_EVAL_INCLUDE_ACTION_INPUT",
             default=True,
         ),
-        "evaluation_step_chunk_overlap": _int_setting(
+        "evaluation_step_lookahead": _int_setting(
             config,
-            "evaluation_step_chunk_overlap",
-            "ADARUBRIC_EVAL_STEP_CHUNK_OVERLAP",
-            default=0,
+            "evaluation_step_lookahead",
+            "ADARUBRIC_EVAL_STEP_LOOKAHEAD",
+            default=1,
             minimum=0,
         ),
-        "evaluation_step_chunk_size": _int_setting(
-            config,
-            "evaluation_step_chunk_size",
-            "ADARUBRIC_EVAL_STEP_CHUNK_SIZE",
-            default=10,
-        ),
+        "evaluation_chunk_input_mode": "history_plus_lookahead",
         "filter_strategy": _setting(
             config,
             "filter_strategy",
@@ -640,28 +635,26 @@ def append_evaluation_jsonl(
 def _trajectory_chunks(
     trajectory: Trajectory,
     *,
-    chunk_size: int,
-    overlap: int,
+    lookahead_steps: int,
 ) -> list[TrajectoryChunk]:
     chunks: list[TrajectoryChunk] = []
     total_steps = len(trajectory.steps)
-    for chunk_index, core_start in enumerate(range(0, total_steps, chunk_size), 1):
-        core_end = min(core_start + chunk_size, total_steps)
-        context_start = max(0, core_start - overlap)
-        context_end = min(total_steps, core_end + overlap)
-        steps = trajectory.steps[context_start:context_end]
-        core_steps = trajectory.steps[core_start:core_end]
-        core_step_ids = {step.step_id for step in core_steps}
+    for chunk_index, target_index in enumerate(range(total_steps), 1):
+        target_step = trajectory.steps[target_index]
+        context_end = min(total_steps, target_index + 1 + lookahead_steps)
+        steps = trajectory.steps[:context_end]
+        core_step_ids = {target_step.step_id}
         metadata = dict(trajectory.metadata)
         metadata.update(
             {
                 "chunk_index": chunk_index,
-                "chunk_context_start_step_id": steps[0].step_id,
+                "chunk_input_mode": "history_plus_lookahead",
+                "chunk_context_start_step_id": trajectory.steps[0].step_id,
                 "chunk_context_end_step_id": steps[-1].step_id,
-                "chunk_core_start_step_id": core_steps[0].step_id,
-                "chunk_core_end_step_id": core_steps[-1].step_id,
+                "chunk_core_start_step_id": target_step.step_id,
+                "chunk_core_end_step_id": target_step.step_id,
                 "chunk_core_step_ids": sorted(core_step_ids),
-                "chunk_overlap": overlap,
+                "chunk_lookahead_steps": lookahead_steps,
                 "original_num_steps": total_steps,
             }
         )
@@ -671,7 +664,7 @@ def _trajectory_chunks(
                     trajectory_id=trajectory.trajectory_id,
                     task_id=trajectory.task_id,
                     steps=steps,
-                    final_answer=trajectory.final_answer if core_end >= total_steps else None,
+                    final_answer=trajectory.final_answer,
                     metadata=metadata,
                 ),
                 core_step_ids=core_step_ids,
@@ -753,17 +746,11 @@ async def evaluate_trajectory(
         "ADARUBRIC_EVAL_CHUNK_THRESHOLD",
         default=10,
     )
-    chunk_size = _int_setting(
+    lookahead_steps = _int_setting(
         config,
-        "evaluation_step_chunk_size",
-        "ADARUBRIC_EVAL_STEP_CHUNK_SIZE",
-        default=10,
-    )
-    chunk_overlap = _int_setting(
-        config,
-        "evaluation_step_chunk_overlap",
-        "ADARUBRIC_EVAL_STEP_CHUNK_OVERLAP",
-        default=0,
+        "evaluation_step_lookahead",
+        "ADARUBRIC_EVAL_STEP_LOOKAHEAD",
+        default=1,
         minimum=0,
     )
 
@@ -779,8 +766,8 @@ async def evaluate_trajectory(
             {
                 "evaluation_chunk_enabled": chunk_enabled,
                 "evaluation_chunk_threshold": chunk_threshold,
-                "evaluation_step_chunk_size": chunk_size,
-                "evaluation_step_chunk_overlap": chunk_overlap,
+                "evaluation_step_lookahead": lookahead_steps,
+                "evaluation_chunk_input_mode": "history_plus_lookahead",
                 "evaluation_num_chunks": 1,
                 "evaluation_include_action": include_action,
                 "evaluation_include_action_input": include_action_input,
@@ -790,14 +777,13 @@ async def evaluate_trajectory(
 
     chunks = _trajectory_chunks(
         trajectory,
-        chunk_size=chunk_size,
-        overlap=chunk_overlap,
+        lookahead_steps=lookahead_steps,
     )
     print(
         f"Trajectory {trajectory.trajectory_id}: evaluating "
-        f"{len(trajectory.steps)} steps in {len(chunks)} chunk(s), "
-        f"threshold={chunk_threshold}, chunk_size={chunk_size}, "
-        f"overlap={chunk_overlap}"
+        f"{len(trajectory.steps)} steps step-by-step in {len(chunks)} request(s), "
+        f"threshold={chunk_threshold}, lookahead={lookahead_steps}, "
+        "input_mode=history_plus_lookahead"
     )
 
     step_evaluations = []
@@ -809,14 +795,19 @@ async def evaluate_trajectory(
                 temperature=temperature,
                 task_instruction=task.instruction,
                 max_tokens=eval_max_tokens,
+                target_step_ids=chunk.core_step_ids,
             )
         except Exception as exc:
             steps = chunk.trajectory.steps
-            step_range = f"{steps[0].step_id}-{steps[-1].step_id}"
+            core_range = (
+                f"{min(chunk.core_step_ids)}-{max(chunk.core_step_ids)}"
+                if chunk.core_step_ids
+                else "unknown"
+            )
             raise EvaluationError(
                 f"Failed to evaluate trajectory {trajectory.trajectory_id} "
                 f"chunk {chunk_number}/{len(chunks)} "
-                f"(step_ids={step_range}): {exc}",
+                f"(target_step_ids={core_range}): {exc}",
                 context={
                     "trajectory_id": trajectory.trajectory_id,
                     "chunk_number": chunk_number,
@@ -847,8 +838,8 @@ async def evaluate_trajectory(
         metadata={
             "evaluation_chunk_enabled": chunk_enabled,
             "evaluation_chunk_threshold": chunk_threshold,
-            "evaluation_step_chunk_size": chunk_size,
-            "evaluation_step_chunk_overlap": chunk_overlap,
+            "evaluation_step_lookahead": lookahead_steps,
+            "evaluation_chunk_input_mode": "history_plus_lookahead",
             "evaluation_num_chunks": len(chunks),
             "evaluation_include_action": include_action,
             "evaluation_include_action_input": include_action_input,
