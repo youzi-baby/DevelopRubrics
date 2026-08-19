@@ -161,3 +161,33 @@ def test_build_stepwise_observation_thinking_config_hides_action_fields():
     assert config["evaluation_jsonl_path"] == (
         "docs/experiments/2026081804/jiawen_gui_eval_stepwise_observation_thinking.jsonl"
     )
+
+
+def test_build_experiment_record_summarizes_purpose_and_variables():
+    module = _load_module()
+    spec = module.EXPERIMENTS["eval-stepwise-observation-no-thinking"]
+    config = module.build_experiment_config(
+        {"evaluation_max_concurrent": 2, "evaluation_max_tokens": 8042},
+        spec,
+        PROJECT_ROOT / "docs" / "experiments" / "2026081803",
+    )
+    manifest = {
+        "generated_config": "docs/experiments/2026081803/experiment_config.json",
+        "log_path": "docs/experiments/2026081803/run.log",
+        "status": "completed",
+        "return_code": 0,
+    }
+
+    record = module.build_experiment_record(
+        experiment_id="2026081803",
+        spec=spec,
+        config=config,
+        manifest=manifest,
+    )
+
+    assert "# Experiment 2026081803: eval-stepwise-observation-no-thinking" in record
+    assert "Measure whether observation-only evidence is sufficient" in record
+    assert "- input_evidence: observation only" in record
+    assert "- thinking: disabled" in record
+    assert "- status: completed" in record
+    assert "- return_code: 0" in record

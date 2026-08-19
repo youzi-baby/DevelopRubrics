@@ -40,6 +40,8 @@ class ExperimentSpec:
     script: Path
     output_overrides: dict[str, str]
     fixed_overrides: dict[str, Any]
+    purpose: str
+    variables: dict[str, str]
 
 
 EXPERIMENTS: dict[str, ExperimentSpec] = {
@@ -52,6 +54,8 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "raw_response_path": "jiawen_gui_initial_rubric.raw_response.txt",
         },
         fixed_overrides={},
+        purpose="Generate task-specific rubrics for the selected Jiawen GUI task set.",
+        variables={"stage": "rubric generation"},
     ),
     "eval-stepwise-no-thinking": ExperimentSpec(
         name="eval-stepwise-no-thinking",
@@ -67,6 +71,15 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "evaluation_chunk_enabled": True,
             "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
+        purpose=(
+            "Measure the new step-wise evaluator with action, action_input, and "
+            "observation visible while Qwen thinking is disabled."
+        ),
+        variables={
+            "input_evidence": "action + action_input + observation",
+            "thinking": "disabled",
+            "evaluation_mode": "step-wise history + target step + one-step look-ahead",
         },
     ),
     "eval-stepwise-thinking": ExperimentSpec(
@@ -84,6 +97,15 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
         },
+        purpose=(
+            "Measure whether Qwen thinking improves the new step-wise evaluator when "
+            "action, action_input, and observation are visible."
+        ),
+        variables={
+            "input_evidence": "action + action_input + observation",
+            "thinking": "enabled",
+            "evaluation_mode": "step-wise history + target step + one-step look-ahead",
+        },
     ),
     "eval-stepwise-observation-no-thinking": ExperimentSpec(
         name="eval-stepwise-observation-no-thinking",
@@ -100,6 +122,15 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
+        purpose=(
+            "Measure whether observation-only evidence is sufficient for the new "
+            "step-wise evaluator when Qwen thinking is disabled."
+        ),
+        variables={
+            "input_evidence": "observation only",
+            "thinking": "disabled",
+            "evaluation_mode": "step-wise history + target step + one-step look-ahead",
+        },
     ),
     "eval-stepwise-observation-thinking": ExperimentSpec(
         name="eval-stepwise-observation-thinking",
@@ -115,6 +146,15 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
             "evaluation_chunk_enabled": True,
             "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        },
+        purpose=(
+            "Measure whether Qwen thinking helps observation-only step-wise evaluation "
+            "without action or action_input evidence."
+        ),
+        variables={
+            "input_evidence": "observation only",
+            "thinking": "enabled",
+            "evaluation_mode": "step-wise history + target step + one-step look-ahead",
         },
     ),
 }
@@ -244,6 +284,86 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _format_bool(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def build_experiment_record(
+    *,
+    experiment_id: str,
+    spec: ExperimentSpec,
+    config: Config,
+    manifest: dict[str, Any],
+) -> str:
+    output_paths = {
+        key: config[key]
+        for key in sorted(spec.output_overrides)
+        if key in config
+    }
+    lines = [
+        f"# Experiment {experiment_id}: {spec.name}",
+        "",
+        "## Purpose",
+        "",
+        spec.purpose,
+        "",
+        "## Variables",
+        "",
+    ]
+    for key, value in spec.variables.items():
+        lines.append(f"- {key}: {value}")
+    lines.extend(
+        [
+            f"- evaluation_include_action: {_format_bool(config.get('evaluation_include_action'))}",
+            "- evaluation_include_action_input: "
+            f"{_format_bool(config.get('evaluation_include_action_input'))}",
+            f"- evaluation_step_lookahead: {config.get('evaluation_step_lookahead')}",
+            f"- evaluation_max_concurrent: {config.get('evaluation_max_concurrent')}",
+            f"- evaluation_max_tokens: {config.get('evaluation_max_tokens')}",
+            f"- extra_body: `{json.dumps(config.get('extra_body'), ensure_ascii=False)}`",
+            "",
+            "## Files",
+            "",
+            f"- config: {manifest['generated_config']}",
+            f"- log: {manifest['log_path']}",
+        ]
+    )
+    for key, value in output_paths.items():
+        lines.append(f"- {key}: {value}")
+    lines.extend(
+        [
+            "",
+            "## Result",
+            "",
+            f"- status: {manifest.get('status', 'pending')}",
+        ]
+    )
+    if "return_code" in manifest:
+        lines.append(f"- return_code: {manifest['return_code']}")
+    return "\n".join(lines) + "\n"
+
+
+def write_experiment_record(
+    path: Path,
+    *,
+    experiment_id: str,
+    spec: ExperimentSpec,
+    config: Config,
+    manifest: dict[str, Any],
+) -> None:
+    path.write_text(
+        build_experiment_record(
+            experiment_id=experiment_id,
+            spec=spec,
+            config=config,
+            manifest=manifest,
+        ),
+        encoding="utf-8",
+    )
+
+
 def run_command(command: list[str], *, cwd: Path, log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_file:
@@ -290,6 +410,7 @@ def main() -> int:
         config_path = output_dir / "experiment_config.json"
         manifest_path = output_dir / "manifest.json"
         log_path = output_dir / "run.log"
+        record_path = output_dir / "experiment_record.md"
         command = [
             sys.executable,
             _relative_to_project(spec.script),
@@ -304,11 +425,19 @@ def main() -> int:
             "plan": _relative_to_project(plan_path),
             "generated_config": _relative_to_project(config_path),
             "log_path": _relative_to_project(log_path),
+            "record_path": _relative_to_project(record_path),
             "command": command,
             "status": "pending",
         }
         write_json(config_path, config)
         write_json(manifest_path, manifest)
+        write_experiment_record(
+            record_path,
+            experiment_id=output_dir.name,
+            spec=spec,
+            config=config,
+            manifest=manifest,
+        )
         batch_manifest.append(manifest)
 
         print("")
@@ -317,12 +446,26 @@ def main() -> int:
         if args.dry_run:
             manifest["status"] = "dry-run"
             write_json(manifest_path, manifest)
+            write_experiment_record(
+                record_path,
+                experiment_id=output_dir.name,
+                spec=spec,
+                config=config,
+                manifest=manifest,
+            )
             continue
 
         return_code = run_command(command, cwd=PROJECT_ROOT, log_path=log_path)
         manifest["return_code"] = return_code
         manifest["status"] = "completed" if return_code == 0 else "failed"
         write_json(manifest_path, manifest)
+        write_experiment_record(
+            record_path,
+            experiment_id=output_dir.name,
+            spec=spec,
+            config=config,
+            manifest=manifest,
+        )
         if return_code != 0 and not args.continue_on_error:
             write_json(output_root / f"batch_{args.date}.last.json", batch_manifest)
             return return_code
