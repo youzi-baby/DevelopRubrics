@@ -3,10 +3,11 @@
 Example:
     .venv\\Scripts\\python examples\\run-jiawen-experiments.py
 
-By default this runs three scoring ablations:
-    1. observation-only input, Qwen thinking disabled
-    2. action + action_input input, Qwen thinking disabled
-    3. observation-only input, Qwen thinking enabled
+By default this runs four step-wise scoring experiments:
+    1. action + action_input + observation, Qwen thinking disabled
+    2. action + action_input + observation, Qwen thinking enabled
+    3. observation-only, Qwen thinking disabled
+    4. observation-only, Qwen thinking enabled
 
 Each experiment receives a new folder under docs/experiments, such as
 2026081801, 2026081802, and a generated config whose output paths point into
@@ -52,45 +53,67 @@ EXPERIMENTS: dict[str, ExperimentSpec] = {
         },
         fixed_overrides={},
     ),
-    "eval-observation-no-thinking": ExperimentSpec(
-        name="eval-observation-no-thinking",
+    "eval-stepwise-no-thinking": ExperimentSpec(
+        name="eval-stepwise-no-thinking",
         script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
         output_overrides={
-            "evaluation_report_path": "jiawen_gui_eval_observation_no_thinking.md",
-            "evaluation_jsonl_path": "jiawen_gui_eval_observation_no_thinking.jsonl",
-        },
-        fixed_overrides={
-            "evaluation_resume_from_jsonl": False,
-            "evaluation_include_action": False,
-            "evaluation_include_action_input": False,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-        },
-    ),
-    "eval-action-no-thinking": ExperimentSpec(
-        name="eval-action-no-thinking",
-        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
-        output_overrides={
-            "evaluation_report_path": "jiawen_gui_eval_action_no_thinking.md",
-            "evaluation_jsonl_path": "jiawen_gui_eval_action_no_thinking.jsonl",
+            "evaluation_report_path": "jiawen_gui_eval_stepwise_no_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_stepwise_no_thinking.jsonl",
         },
         fixed_overrides={
             "evaluation_resume_from_jsonl": False,
             "evaluation_include_action": True,
             "evaluation_include_action_input": True,
+            "evaluation_chunk_enabled": True,
+            "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
     ),
-    "eval-observation-thinking": ExperimentSpec(
-        name="eval-observation-thinking",
+    "eval-stepwise-thinking": ExperimentSpec(
+        name="eval-stepwise-thinking",
         script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
         output_overrides={
-            "evaluation_report_path": "jiawen_gui_eval_observation_thinking.md",
-            "evaluation_jsonl_path": "jiawen_gui_eval_observation_thinking.jsonl",
+            "evaluation_report_path": "jiawen_gui_eval_stepwise_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_stepwise_thinking.jsonl",
+        },
+        fixed_overrides={
+            "evaluation_resume_from_jsonl": False,
+            "evaluation_include_action": True,
+            "evaluation_include_action_input": True,
+            "evaluation_chunk_enabled": True,
+            "evaluation_step_lookahead": 1,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        },
+    ),
+    "eval-stepwise-observation-no-thinking": ExperimentSpec(
+        name="eval-stepwise-observation-no-thinking",
+        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
+        output_overrides={
+            "evaluation_report_path": "jiawen_gui_eval_stepwise_observation_no_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_stepwise_observation_no_thinking.jsonl",
         },
         fixed_overrides={
             "evaluation_resume_from_jsonl": False,
             "evaluation_include_action": False,
             "evaluation_include_action_input": False,
+            "evaluation_chunk_enabled": True,
+            "evaluation_step_lookahead": 1,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
+    ),
+    "eval-stepwise-observation-thinking": ExperimentSpec(
+        name="eval-stepwise-observation-thinking",
+        script=PROJECT_ROOT / "examples" / "evaluate-jiawen-rubrics.py",
+        output_overrides={
+            "evaluation_report_path": "jiawen_gui_eval_stepwise_observation_thinking.md",
+            "evaluation_jsonl_path": "jiawen_gui_eval_stepwise_observation_thinking.jsonl",
+        },
+        fixed_overrides={
+            "evaluation_resume_from_jsonl": False,
+            "evaluation_include_action": False,
+            "evaluation_include_action_input": False,
+            "evaluation_chunk_enabled": True,
+            "evaluation_step_lookahead": 1,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
         },
     ),

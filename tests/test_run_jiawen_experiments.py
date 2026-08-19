@@ -40,13 +40,24 @@ def test_load_experiment_names_from_plan_file(tmp_path):
     module = _load_module()
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
-        json.dumps({"experiments": ["eval-observation-no-thinking", "eval-action-no-thinking"]}),
+        json.dumps(
+            {
+                "experiments": [
+                    "eval-stepwise-no-thinking",
+                    "eval-stepwise-thinking",
+                    "eval-stepwise-observation-no-thinking",
+                    "eval-stepwise-observation-thinking",
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
     assert module.load_experiment_names(plan_path=plan_path, override=None) == [
-        "eval-observation-no-thinking",
-        "eval-action-no-thinking",
+        "eval-stepwise-no-thinking",
+        "eval-stepwise-thinking",
+        "eval-stepwise-observation-no-thinking",
+        "eval-stepwise-observation-thinking",
     ]
 
 
@@ -56,13 +67,13 @@ def test_load_experiment_names_override_skips_plan(tmp_path):
 
     assert module.load_experiment_names(
         plan_path=missing_plan,
-        override="eval-action-no-thinking,eval-observation-thinking",
-    ) == ["eval-action-no-thinking", "eval-observation-thinking"]
+        override="eval-stepwise-no-thinking,eval-stepwise-thinking",
+    ) == ["eval-stepwise-no-thinking", "eval-stepwise-thinking"]
 
 
-def test_build_observation_no_thinking_config_points_outputs_to_experiment_dir(tmp_path):
+def test_build_stepwise_no_thinking_config_points_outputs_to_experiment_dir(tmp_path):
     module = _load_module()
-    spec = module.EXPERIMENTS["eval-observation-no-thinking"]
+    spec = module.EXPERIMENTS["eval-stepwise-no-thinking"]
     config = module.build_experiment_config(
         {
             "evaluation_resume_from_jsonl": True,
@@ -75,53 +86,78 @@ def test_build_observation_no_thinking_config_points_outputs_to_experiment_dir(t
 
     assert config["model"] == "qwen"
     assert config["evaluation_resume_from_jsonl"] is False
-    assert config["evaluation_include_action"] is False
-    assert config["evaluation_include_action_input"] is False
-    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
-    assert config["evaluation_report_path"] == (
-        "docs/experiments/2026081801/jiawen_gui_eval_observation_no_thinking.md"
-    )
-    assert config["evaluation_jsonl_path"] == (
-        "docs/experiments/2026081801/jiawen_gui_eval_observation_no_thinking.jsonl"
-    )
-
-
-def test_build_action_no_thinking_config_includes_action_fields():
-    module = _load_module()
-    spec = module.EXPERIMENTS["eval-action-no-thinking"]
-    config = module.build_experiment_config(
-        {"evaluation_include_action": False, "evaluation_include_action_input": False},
-        spec,
-        PROJECT_ROOT / "docs" / "experiments" / "2026081802",
-    )
-
     assert config["evaluation_include_action"] is True
     assert config["evaluation_include_action_input"] is True
+    assert config["evaluation_chunk_enabled"] is True
+    assert config["evaluation_step_lookahead"] == 1
     assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert config["evaluation_report_path"] == (
-        "docs/experiments/2026081802/jiawen_gui_eval_action_no_thinking.md"
+        "docs/experiments/2026081801/jiawen_gui_eval_stepwise_no_thinking.md"
+    )
+    assert config["evaluation_jsonl_path"] == (
+        "docs/experiments/2026081801/jiawen_gui_eval_stepwise_no_thinking.jsonl"
     )
 
 
-def test_build_observation_thinking_config_enables_qwen_thinking():
+def test_build_stepwise_thinking_config_enables_qwen_thinking():
     module = _load_module()
-    spec = module.EXPERIMENTS["eval-observation-thinking"]
+    spec = module.EXPERIMENTS["eval-stepwise-thinking"]
     config = module.build_experiment_config(
         {
             "evaluation_resume_from_jsonl": True,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
         spec,
-        PROJECT_ROOT / "docs" / "experiments" / "2026081803",
+        PROJECT_ROOT / "docs" / "experiments" / "2026081802",
     )
 
     assert config["evaluation_resume_from_jsonl"] is False
-    assert config["evaluation_include_action"] is False
-    assert config["evaluation_include_action_input"] is False
+    assert config["evaluation_include_action"] is True
+    assert config["evaluation_include_action_input"] is True
+    assert config["evaluation_chunk_enabled"] is True
+    assert config["evaluation_step_lookahead"] == 1
     assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
     assert config["evaluation_report_path"] == (
-        "docs/experiments/2026081803/jiawen_gui_eval_observation_thinking.md"
+        "docs/experiments/2026081802/jiawen_gui_eval_stepwise_thinking.md"
     )
     assert config["evaluation_jsonl_path"] == (
-        "docs/experiments/2026081803/jiawen_gui_eval_observation_thinking.jsonl"
+        "docs/experiments/2026081802/jiawen_gui_eval_stepwise_thinking.jsonl"
+    )
+
+
+def test_build_stepwise_observation_no_thinking_config_hides_action_fields():
+    module = _load_module()
+    spec = module.EXPERIMENTS["eval-stepwise-observation-no-thinking"]
+    config = module.build_experiment_config(
+        {"evaluation_include_action": True, "evaluation_include_action_input": True},
+        spec,
+        PROJECT_ROOT / "docs" / "experiments" / "2026081803",
+    )
+
+    assert config["evaluation_include_action"] is False
+    assert config["evaluation_include_action_input"] is False
+    assert config["evaluation_chunk_enabled"] is True
+    assert config["evaluation_step_lookahead"] == 1
+    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert config["evaluation_report_path"] == (
+        "docs/experiments/2026081803/jiawen_gui_eval_stepwise_observation_no_thinking.md"
+    )
+
+
+def test_build_stepwise_observation_thinking_config_hides_action_fields():
+    module = _load_module()
+    spec = module.EXPERIMENTS["eval-stepwise-observation-thinking"]
+    config = module.build_experiment_config(
+        {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        spec,
+        PROJECT_ROOT / "docs" / "experiments" / "2026081804",
+    )
+
+    assert config["evaluation_include_action"] is False
+    assert config["evaluation_include_action_input"] is False
+    assert config["evaluation_chunk_enabled"] is True
+    assert config["evaluation_step_lookahead"] == 1
+    assert config["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+    assert config["evaluation_jsonl_path"] == (
+        "docs/experiments/2026081804/jiawen_gui_eval_stepwise_observation_thinking.jsonl"
     )
