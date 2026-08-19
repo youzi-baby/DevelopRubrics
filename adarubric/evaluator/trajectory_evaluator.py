@@ -38,13 +38,13 @@ class _DimensionScoreRaw(BaseModel):
     dimension_name: str
     score: int = Field(ge=1, le=5)
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
-    rationale: str = ""
+    rationale: str = Field(default="", max_length=300)
 
 
 class _StepEvalRaw(BaseModel):
     step_id: int
     dimension_scores: list[_DimensionScoreRaw]
-    step_quality_summary: str = ""
+    step_quality_summary: str = Field(default="", max_length=240)
 
 
 class _EvaluationResponse(BaseModel):

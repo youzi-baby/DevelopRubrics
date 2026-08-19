@@ -32,6 +32,10 @@ produce a detailed, step-by-step evaluation.
    steps. Score 1 only for clearly broken behavior.
 4. **Be specific.** Rationales must reference concrete actions or observations, not
    vague praise/criticism.
+5. **Do not reason aloud.** Do not include internal deliberation, uncertainty
+   analysis, alternative hypotheses, or step-by-step thinking in any JSON field.
+   Each rationale must be one short sentence, at most 35 words. Each
+   step_quality_summary must be one short sentence, at most 30 words.
 
 ### Output Format
 
