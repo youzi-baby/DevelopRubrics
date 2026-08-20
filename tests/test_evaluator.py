@@ -272,3 +272,46 @@ async def test_llm_evaluator_truncates_overlong_rationales(sample_trajectory, sa
     assert len(score.rationale) <= 300
     assert score.rationale.endswith("...")
     assert len(result.step_evaluations[0].step_quality_summary) <= 240
+
+
+@pytest.mark.asyncio
+async def test_llm_evaluator_recovers_misplaced_step_quality_summary(
+    sample_trajectory,
+    sample_rubric,
+):
+    raw = json.dumps(
+        {
+            "trajectory_id": "traj",
+            "task_id": "task",
+            "step_evaluations": [
+                {
+                    "step_id": 0,
+                    "dimension_scores": [
+                        {
+                            "dimension_name": "SearchStrategyQuality",
+                            "score": 4,
+                            "confidence": 1.0,
+                            "rationale": "Relevant action.",
+                        },
+                        {
+                            "dimension_name": "DataExtractionAccuracy",
+                            "score": 3,
+                            "confidence": 0.8,
+                            "rationale": "Partial evidence.",
+                        },
+                        {
+                            "step_quality_summary": "The step is useful but incomplete.",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    client = MockLLMClient({"_EvaluationResponse": raw})
+    ev = LLMTrajectoryEvaluator(client)
+
+    result = await ev.evaluate(sample_trajectory, sample_rubric, target_step_ids={0})
+
+    step_eval = result.step_evaluations[0]
+    assert len(step_eval.dimension_scores) == 2
+    assert step_eval.step_quality_summary == "The step is useful but incomplete."

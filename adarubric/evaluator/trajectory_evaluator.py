@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from adarubric.core.exceptions import EvaluationError
 from adarubric.core.models import (
@@ -48,6 +48,32 @@ class _StepEvalRaw(BaseModel):
     step_id: int
     dimension_scores: list[_DimensionScoreRaw]
     step_quality_summary: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_misplaced_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        dimension_scores = data.get("dimension_scores")
+        if not isinstance(dimension_scores, list):
+            return data
+
+        normalized_scores: list[Any] = []
+        summary = data.get("step_quality_summary", "")
+        for item in dimension_scores:
+            if not isinstance(item, dict):
+                continue
+            if "dimension_name" in item and "score" in item:
+                normalized_scores.append(item)
+                continue
+            if not summary and "step_quality_summary" in item:
+                summary = item["step_quality_summary"]
+
+        normalized = dict(data)
+        normalized["dimension_scores"] = normalized_scores
+        normalized["step_quality_summary"] = summary
+        return normalized
 
 
 class _EvaluationResponse(BaseModel):
