@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from adarubric.core.models import (
@@ -229,3 +231,44 @@ async def test_llm_evaluator_targets_step_ids_with_full_context(sample_trajector
     assert "--- Step 0 [CONTEXT ONLY - DO NOT SCORE] ---" in prompt_text
     assert "--- Step 1 [TARGET - SCORE THIS STEP] ---" in prompt_text
     assert [step.step_id for step in result.step_evaluations] == [1]
+
+
+@pytest.mark.asyncio
+async def test_llm_evaluator_truncates_overlong_rationales(sample_trajectory, sample_rubric):
+    long_rationale = "The agent opened the app correctly. " * 20
+    long_summary = "This step contains an overly verbose quality summary. " * 10
+    raw = json.dumps(
+        {
+            "trajectory_id": "traj",
+            "task_id": "task",
+            "step_evaluations": [
+                {
+                    "step_id": 0,
+                    "dimension_scores": [
+                        {
+                            "dimension_name": "SearchStrategyQuality",
+                            "score": 4,
+                            "confidence": 1.0,
+                            "rationale": long_rationale,
+                        },
+                        {
+                            "dimension_name": "DataExtractionAccuracy",
+                            "score": 4,
+                            "confidence": 1.0,
+                            "rationale": long_rationale,
+                        },
+                    ],
+                    "step_quality_summary": long_summary,
+                }
+            ],
+        }
+    )
+    client = MockLLMClient({"_EvaluationResponse": raw})
+    ev = LLMTrajectoryEvaluator(client)
+
+    result = await ev.evaluate(sample_trajectory, sample_rubric, target_step_ids={0})
+
+    score = result.step_evaluations[0].dimension_scores[0]
+    assert len(score.rationale) <= 300
+    assert score.rationale.endswith("...")
+    assert len(result.step_evaluations[0].step_quality_summary) <= 240

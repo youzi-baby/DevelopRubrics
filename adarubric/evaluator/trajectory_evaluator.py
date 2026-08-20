@@ -28,6 +28,9 @@ from adarubric.llm.base import LLMClient
 
 logger = logging.getLogger(__name__)
 
+_RATIONALE_MAX_CHARS = 300
+_STEP_SUMMARY_MAX_CHARS = 240
+
 
 # ---------------------------------------------------------------------------
 # Intermediate Pydantic model for parsing LLM evaluation output
@@ -38,19 +41,26 @@ class _DimensionScoreRaw(BaseModel):
     dimension_name: str
     score: int = Field(ge=1, le=5)
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
-    rationale: str = Field(default="", max_length=300)
+    rationale: str = ""
 
 
 class _StepEvalRaw(BaseModel):
     step_id: int
     dimension_scores: list[_DimensionScoreRaw]
-    step_quality_summary: str = Field(default="", max_length=240)
+    step_quality_summary: str = ""
 
 
 class _EvaluationResponse(BaseModel):
     trajectory_id: str = ""
     task_id: str = ""
     step_evaluations: list[_StepEvalRaw]
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +208,7 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
                     dimension_name=ds.dimension_name,
                     score=ds.score,
                     confidence=ds.confidence,
-                    rationale=ds.rationale,
+                    rationale=_truncate_text(ds.rationale, _RATIONALE_MAX_CHARS),
                 )
                 for ds in raw_step.dimension_scores
                 if ds.dimension_name in valid_dims
@@ -207,7 +217,10 @@ class LLMTrajectoryEvaluator(TrajectoryEvaluatorBase):
                 StepEvaluation(
                     step_id=raw_step.step_id,
                     dimension_scores=dim_scores,
-                    step_quality_summary=raw_step.step_quality_summary,
+                    step_quality_summary=_truncate_text(
+                        raw_step.step_quality_summary,
+                        _STEP_SUMMARY_MAX_CHARS,
+                    ),
                 )
             )
 

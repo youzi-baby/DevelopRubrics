@@ -12,30 +12,35 @@ produce a detailed, step-by-step evaluation.
 
 ### Evaluation Protocol
 
-1. **Read the rubric carefully.** Internalize what each scoring level (1–5) means
-   for every dimension.
-2. **Evaluate each step independently.** For each (Thought, Action, Observation) step:
+1. **Read the rubric carefully.** Internalize what each scoring level (1-5)
+   means for every dimension.
+2. **Evaluate each target step independently.** For each target step:
    - Score it on every applicable dimension using the rubric's criteria.
-   - Assign a confidence (0.0–1.0) reflecting **step-dimension applicability**:
+   - Assign a confidence (0.0-1.0) reflecting **step-dimension applicability**:
      how directly this step provides evidence for this rubric dimension.
      Confidence is NOT how certain you are that the step is good or bad.
      A clearly bad but dimension-relevant step should receive a low score with high
      confidence. A step that does not address the dimension should receive low
      confidence, even if the trajectory is generally poor.
      Use this calibration:
-       * 0.0–0.2: not applicable; the step provides almost no evidence for this dimension.
-       * 0.3–0.5: weakly applicable; only indirect or partial evidence is present.
-       * 0.6–0.8: applicable; the step provides useful but incomplete evidence.
-       * 0.9–1.0: directly applicable; the step clearly exercises this dimension.
+       * 0.0-0.2: not applicable; the step provides almost no evidence.
+       * 0.3-0.5: weakly applicable; indirect or partial evidence is present.
+       * 0.6-0.8: applicable; useful but incomplete evidence is present.
+       * 0.9-1.0: directly applicable; the step clearly exercises this dimension.
    - Provide a concise rationale grounding the score in observed behavior.
-3. **Be calibrated.** Score 3 = acceptable execution. Reserve 5 for genuinely excellent
-   steps. Score 1 only for clearly broken behavior.
-4. **Be specific.** Rationales must reference concrete actions or observations, not
-   vague praise/criticism.
-5. **Do not reason aloud.** Do not include internal deliberation, uncertainty
+3. **Be calibrated.** Score 3 = acceptable execution. Reserve 5 for genuinely
+   excellent steps. Score 1 only for clearly broken behavior.
+4. **Be specific.** Rationales must reference concrete actions or observations,
+   not vague praise/criticism.
+5. **Keep output terse.** Do not include internal deliberation, uncertainty
    analysis, alternative hypotheses, or step-by-step thinking in any JSON field.
-   Each rationale must be one short sentence, at most 35 words. Each
-   step_quality_summary must be one short sentence, at most 30 words.
+   Each rationale must be one short evidence statement, at most 18 English words
+   or 30 Chinese characters. Each step_quality_summary must be one short sentence,
+   at most 20 English words or 35 Chinese characters.
+6. **Do not debate ambiguity.** If evidence is ambiguous, write exactly
+   "Evidence ambiguous." in the rationale and choose the most conservative
+   score supported by the target step. Do not explain multiple possible
+   interpretations.
 
 ### Output Format
 
@@ -46,10 +51,10 @@ Return a JSON object with:
   - step_id: integer
   - dimension_scores: array of objects, each containing:
     - dimension_name: string (must match a rubric dimension name exactly)
-    - score: integer (1–5)
-    - confidence: number (0.0–1.0)
-    - rationale: string (1–2 sentences)
-  - step_quality_summary: string (1 sentence overall assessment of the step)\
+    - score: integer (1-5)
+    - confidence: number (0.0-1.0)
+    - rationale: string (one short evidence statement only)
+  - step_quality_summary: string (one short sentence overall assessment of the step)\
 """
 
 EVALUATION_USER = """\
